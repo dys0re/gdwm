@@ -41,8 +41,6 @@ public:
     static bool supported();
 
 protected:
-    bool drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window, int mask, const Region &deviceRegion, WindowPaintData &data) override;
-
     /**
      * This function must be called when the effect wants to animate the specified
      * @a window.
@@ -75,13 +73,13 @@ protected:
     bool blocksDirectScanout() const override;
 
 private Q_SLOTS:
-    void handleWindowDamaged(KWin::EffectWindow *window);
     void handleWindowDeleted(KWin::EffectWindow *window);
 
 private:
     void setupConnections();
     void destroyConnections();
 
+    friend class OffscreenEffectItem;
     std::unique_ptr<OffscreenEffectPrivate> d;
 };
 

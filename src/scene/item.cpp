@@ -580,12 +580,18 @@ void Item::discardQuads()
     m_quads.reset();
 }
 
-WindowQuadList Item::quads(ItemRenderer *renderer) const
+RenderGeometry Item::geometry(ItemRenderer *renderer, double scale) const
 {
     if (!m_quads.has_value()) {
         m_quads = buildQuads(renderer);
     }
-    return m_quads.value();
+    RenderGeometry geometry;
+    geometry.reserve(m_quads->count() * 6);
+    for (const WindowQuad &quad : *m_quads) {
+        geometry.appendWindowQuad(quad, scale);
+    }
+    geometry.setVertexSnappingMode(m_vertexSnappingMode);
+    return geometry;
 }
 
 bool Item::hasRepaints(RenderView *view) const
@@ -814,6 +820,11 @@ void Item::handleFramePainted(SceneView *view, LogicalOutput *output, OutputFram
 
 void Item::releaseResources(RenderDevice *device)
 {
+}
+
+void Item::setVertexSnappingMode(RenderGeometry::VertexSnappingMode mode)
+{
+    m_vertexSnappingMode = mode;
 }
 
 bool Item::hasVisibleContents() const

@@ -180,7 +180,7 @@ public:
     Region takeDeviceRepaints(RenderView *delegate);
     void resetRepaints(RenderView *delegate);
 
-    WindowQuadList quads(ItemRenderer *renderer) const;
+    RenderGeometry geometry(ItemRenderer *renderer, double scale) const;
     virtual void preprocess(ItemRenderer *renderer);
     const std::shared_ptr<ColorDescription> &colorDescription() const;
     RenderingIntent renderingIntent() const;
@@ -202,6 +202,8 @@ public:
      * @returns if this Item or any of its children have contents to be rendered
      */
     bool hasVisibleContents() const;
+
+    void setVertexSnappingMode(RenderGeometry::VertexSnappingMode mode);
 
 Q_SIGNALS:
     void childAdded(KWin::Item *item);
@@ -271,6 +273,7 @@ private:
     int m_effectCount = 0;
     std::optional<RectF> m_clipRect;
     QList<MirrorItem *> m_mirrors;
+    RenderGeometry::VertexSnappingMode m_vertexSnappingMode = RenderGeometry::VertexSnappingMode::Round;
 
     friend class Scene;
 };
