@@ -8,6 +8,7 @@
 
 #include "config-kwin.h"
 
+#include "core/drmdevice.h"
 #include "core/graphicsbuffer.h"
 #include "utils/common.h"
 
@@ -106,6 +107,11 @@ private:
     bool m_hasAlphaChannel;
 };
 
+GbmGraphicsBufferAllocator::GbmGraphicsBufferAllocator(DrmDevice *device)
+    : m_drmDevice(device)
+{
+}
+
 GbmGraphicsBufferAllocator::GbmGraphicsBufferAllocator(gbm_device *device)
     : m_gbmDevice(device)
 {
@@ -115,9 +121,28 @@ GbmGraphicsBufferAllocator::~GbmGraphicsBufferAllocator()
 {
 }
 
-static GraphicsBuffer *allocateDumb(gbm_device *device, const GraphicsBufferOptions &options)
+int GbmGraphicsBufferAllocator::drmFd() const
 {
-    if (!options.modifiers.isEmpty()) {
+    if (m_drmDevice) {
+        return m_drmDevice->fileDescriptor();
+    }
+    if (m_gbmDevice) {
+        return gbm_device_get_fd(m_gbmDevice);
+    }
+    return -1;
+}
+
+gbm_device *GbmGraphicsBufferAllocator::gbmDevice() const
+{
+    if (m_drmDevice) {
+        return m_drmDevice->gbmDevice();
+    }
+    return m_gbmDevice;
+}
+
+static GraphicsBuffer *allocateDumb(int drmFd, const GraphicsBufferOptions &options)
+{
+    if (!options.modifiers.isEmpty() || drmFd < 0) {
         return nullptr;
     }
 
@@ -125,23 +150,27 @@ static GraphicsBuffer *allocateDumb(gbm_device *device, const GraphicsBufferOpti
         .height = uint32_t(options.size.height()),
         .width = uint32_t(options.size.width()),
         .bpp = 32,
+        .flags = 0,
+        .handle = 0,
+        .pitch = 0,
+        .size = 0,
     };
-    if (drmIoctl(gbm_device_get_fd(device), DRM_IOCTL_MODE_CREATE_DUMB, &createArgs) != 0) {
+    if (drmIoctl(drmFd, DRM_IOCTL_MODE_CREATE_DUMB, &createArgs) != 0) {
         qCWarning(KWIN_CORE) << "DRM_IOCTL_MODE_CREATE_DUMB failed:" << strerror(errno);
         return nullptr;
     }
 
     int primeFd;
-    if (drmPrimeHandleToFD(gbm_device_get_fd(device), createArgs.handle, DRM_CLOEXEC, &primeFd) != 0) {
+    if (drmPrimeHandleToFD(drmFd, createArgs.handle, DRM_CLOEXEC, &primeFd) != 0) {
         qCWarning(KWIN_CORE) << "drmPrimeHandleToFD() failed:" << strerror(errno);
         drm_mode_destroy_dumb destroyArgs{
             .handle = createArgs.handle,
         };
-        drmIoctl(gbm_device_get_fd(device), DRM_IOCTL_MODE_DESTROY_DUMB, &destroyArgs);
+        drmIoctl(drmFd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroyArgs);
         return nullptr;
     }
 
-    return new DumbGraphicsBuffer(gbm_device_get_fd(device), createArgs.handle, DmaBufAttributes{
+    return new DumbGraphicsBuffer(drmFd, createArgs.handle, DmaBufAttributes{
         .planeCount = 1,
         .width = options.size.width(),
         .height = options.size.height(),
@@ -155,6 +184,10 @@ static GraphicsBuffer *allocateDumb(gbm_device *device, const GraphicsBufferOpti
 
 static GraphicsBuffer *allocateDmaBuf(gbm_device *device, const GraphicsBufferOptions &options)
 {
+    if (!device) {
+        return nullptr;
+    }
+
     if (!options.modifiers.isEmpty() && !(options.modifiers.size() == 1 && options.modifiers.first() == DRM_FORMAT_MOD_INVALID)) {
         gbm_bo *bo = gbm_bo_create_with_modifiers(device,
                                                   options.size.width(),
@@ -204,10 +237,10 @@ static GraphicsBuffer *allocateDmaBuf(gbm_device *device, const GraphicsBufferOp
 GraphicsBuffer *GbmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
 {
     if (options.software) {
-        return allocateDumb(m_gbmDevice, options);
+        return allocateDumb(drmFd(), options);
     }
 
-    return allocateDmaBuf(m_gbmDevice, options);
+    return allocateDmaBuf(gbmDevice(), options);
 }
 
 GbmGraphicsBuffer::GbmGraphicsBuffer(DmaBufAttributes attributes, gbm_bo *handle)
@@ -305,6 +338,8 @@ GraphicsBuffer::Map DumbGraphicsBuffer::map(MapFlags flags)
     if (!m_data) {
         drm_mode_map_dumb mapArgs{
             .handle = m_handle,
+            .pad = 0,
+            .offset = 0,
         };
         if (drmIoctl(m_drmFd, DRM_IOCTL_MODE_MAP_DUMB, &mapArgs) != 0) {
             qCWarning(KWIN_CORE) << "DRM_IOCTL_MODE_MAP_DUMB failed:" << strerror(errno);

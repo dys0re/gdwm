@@ -48,6 +48,7 @@ private:
     DamageJournal m_damageJournal;
     std::unique_ptr<CpuRenderTimeQuery> m_renderTime;
     AlignedShadowBuffer m_shadowBuffer;
+    bool m_shadowValid = false;
     uint32_t m_selectedDrmFormat = 0;
 };
 

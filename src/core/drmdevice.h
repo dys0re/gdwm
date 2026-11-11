@@ -36,12 +36,13 @@ public:
     static std::unique_ptr<DrmDevice> openWithAuthentication(const QString &path, int authenticatedFd);
 
 private:
-    explicit DrmDevice(const QString &path, dev_t id, FileDescriptor &&fd, gbm_device *gbmDevice);
+    explicit DrmDevice(const QString &path, dev_t id, FileDescriptor &&fd, gbm_device *gbmDevice = nullptr);
 
     const QString m_path;
     const dev_t m_id;
     const FileDescriptor m_fd;
-    gbm_device *const m_gbmDevice;
+    mutable gbm_device *m_gbmDevice = nullptr;
+    mutable bool m_gbmTried = false;
     const std::unique_ptr<GraphicsBufferAllocator> m_allocator;
     bool m_supportsSyncObjTimelines;
 };

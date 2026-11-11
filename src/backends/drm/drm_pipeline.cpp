@@ -55,9 +55,14 @@ DrmPipeline::Error DrmPipeline::present(const std::shared_ptr<OutputFrame> &fram
 {
     Q_ASSERT(m_pending.crtc);
     if (gpu()->atomicModeSetting()) {
-        const auto sig = currentTestSignature();
-        if (!m_lastValidatedSignature.has_value() || *m_lastValidatedSignature != sig || !m_lastTestPassed) {
-            if (auto err = DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, frame, {}); err != Error::None) {
+        const CommitMode testMode = needsModeset() ? CommitMode::TestAllowModeset : CommitMode::Test;
+        const auto sig = currentTestSignature(testMode);
+        if (m_lastValidatedSignature.has_value() && *m_lastValidatedSignature == sig && m_lastTestError.has_value()) {
+            if (*m_lastTestError != Error::None) {
+                return *m_lastTestError;
+            }
+        } else {
+            if (auto err = DrmPipeline::commitPipelinesAtomic({this}, testMode, frame, {}); err != Error::None) {
                 return err;
             }
         }
@@ -94,17 +99,6 @@ DrmPipeline::Error DrmPipeline::commitPipelines(const QList<DrmPipeline *> &pipe
 
 DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *> &pipelines, CommitMode mode, const std::shared_ptr<OutputFrame> &frame, const QList<DrmObject *> &unusedObjects)
 {
-    if ((mode == CommitMode::Test || mode == CommitMode::TestAllowModeset) && pipelines.count() == 1) {
-        DrmPipeline *pipeline = pipelines[0];
-        const auto sig = pipeline->currentTestSignature();
-        if (pipeline->m_lastValidatedSignature.has_value() &&
-            *pipeline->m_lastValidatedSignature == sig &&
-            pipeline->m_lastTestPassed) {
-            return Error::None;
-        }
-    }
-
-    auto commit = std::make_unique<DrmAtomicCommit>(pipelines);
     if (mode == CommitMode::Test) {
         // if there's a modeset pending, the tests on top of that state
         // also have to allow modesets or they'll always fail
@@ -115,6 +109,18 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
             mode = CommitMode::TestAllowModeset;
         }
     }
+
+    if ((mode == CommitMode::Test || mode == CommitMode::TestAllowModeset) && pipelines.count() == 1) {
+        DrmPipeline *pipeline = pipelines[0];
+        const auto sig = pipeline->currentTestSignature(mode);
+        if (pipeline->m_lastValidatedSignature.has_value() &&
+            *pipeline->m_lastValidatedSignature == sig &&
+            pipeline->m_lastTestError.has_value()) {
+            return *pipeline->m_lastTestError;
+        }
+    }
+
+    auto commit = std::make_unique<DrmAtomicCommit>(pipelines);
     for (const auto &pipeline : pipelines) {
         if (Error err = pipeline->prepareAtomicCommit(commit.get(), mode, frame); err != Error::None) {
             return err;
@@ -126,13 +132,15 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
     switch (mode) {
     case CommitMode::TestAllowModeset: {
         const bool ok = commit->testAllowModeset();
+        const Error testErr = ok ? Error::None : errnoToError();
         if (pipelines.count() == 1) {
-            pipelines[0]->m_lastValidatedSignature = pipelines[0]->currentTestSignature();
+            pipelines[0]->m_lastValidatedSignature = pipelines[0]->currentTestSignature(CommitMode::TestAllowModeset);
             pipelines[0]->m_lastTestPassed = ok;
+            pipelines[0]->m_lastTestError = testErr;
         }
         if (!ok) {
             qCDebug(KWIN_DRM) << "Atomic modeset test failed!" << strerror(errno);
-            return errnoToError();
+            return testErr;
         }
         const bool withoutModeset = std::ranges::all_of(pipelines, [&frame](DrmPipeline *pipeline) {
             auto commit = std::make_unique<DrmAtomicCommit>(QVector<DrmPipeline *>{pipeline});
@@ -141,8 +149,9 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
         for (const auto &pipeline : pipelines) {
             pipeline->m_pending.needsModeset = !withoutModeset;
             pipeline->m_pending.needsModesetProperties = true;
-            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature();
+            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature(CommitMode::TestAllowModeset);
             pipeline->m_lastTestPassed = true;
+            pipeline->m_lastTestError = Error::None;
         }
         return Error::None;
     }
@@ -164,14 +173,16 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
     }
     case CommitMode::Test: {
         const bool ok = commit->test();
+        const Error testErr = ok ? Error::None : errnoToError();
         if (pipelines.count() == 1) {
             DrmPipeline *pipeline = pipelines[0];
-            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature();
+            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature(CommitMode::Test);
             pipeline->m_lastTestPassed = ok;
+            pipeline->m_lastTestError = testErr;
         }
         if (!ok) {
             qCDebug(KWIN_DRM) << "Atomic test failed!" << strerror(errno);
-            return errnoToError();
+            return testErr;
         }
         return Error::None;
     }
@@ -426,8 +437,12 @@ bool DrmPipeline::updateCursor(std::optional<std::chrono::nanoseconds> allowedVr
     }
     // explicitly check for the cursor plane and not for AMS, as we might not always have one
     if (m_pending.crtc->cursorPlane()) {
-        const auto sig = currentTestSignature();
-        if (!m_lastValidatedSignature.has_value() || *m_lastValidatedSignature != sig || !m_lastTestPassed) {
+        const auto sig = currentTestSignature(CommitMode::Test);
+        if (m_lastValidatedSignature.has_value() && *m_lastValidatedSignature == sig && m_lastTestError.has_value()) {
+            if (*m_lastTestError != Error::None) {
+                return false;
+            }
+        } else {
             if (DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, nullptr, {}) != Error::None) {
                 return false;
             }
@@ -778,11 +793,13 @@ void DrmPipeline::invalidateTestCache()
 {
     m_lastValidatedSignature.reset();
     m_lastTestPassed = false;
+    m_lastTestError.reset();
 }
 
-DrmPipeline::AtomicTestSignature DrmPipeline::currentTestSignature() const
+DrmPipeline::AtomicTestSignature DrmPipeline::currentTestSignature(CommitMode mode) const
 {
     AtomicTestSignature sig;
+    sig.allowModeset = (mode == CommitMode::TestAllowModeset);
     sig.crtc = m_pending.crtc;
     sig.active = activePending();
     sig.enabled = m_pending.enabled;

@@ -185,6 +185,7 @@ private:
 
     struct AtomicTestSignature
     {
+        bool allowModeset = false;
         DrmCrtc *crtc = nullptr;
         bool active = false;
         bool enabled = false;
@@ -209,11 +210,12 @@ private:
         bool operator==(const AtomicTestSignature &other) const = default;
     };
 
-    AtomicTestSignature currentTestSignature() const;
+    AtomicTestSignature currentTestSignature(CommitMode mode = CommitMode::Test) const;
     void invalidateTestCache();
 
     std::optional<AtomicTestSignature> m_lastValidatedSignature;
     bool m_lastTestPassed = false;
+    std::optional<Error> m_lastTestError;
 };
 
 }

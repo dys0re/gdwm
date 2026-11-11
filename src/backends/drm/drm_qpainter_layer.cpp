@@ -51,6 +51,7 @@ std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
     }
 
     if (!doesSwapchainFit()) {
+        m_shadowValid = false;
         uint32_t format = determineFormat();
         m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
         m_damageJournal = DamageJournal();
@@ -90,12 +91,13 @@ std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
             if (!m_shadowBuffer.allocate(size, qFormat)) {
                 return std::nullopt;
             }
+            m_shadowValid = false;
             m_damageJournal.clear();
         }
     }
 
     m_renderTime = std::make_unique<CpuRenderTimeQuery>();
-    const QRegion repaint = m_damageJournal.accumulate(m_currentBuffer->age(), infiniteRegion());
+    const QRegion repaint = m_shadowValid ? QRegion() : infiniteRegion();
     return OutputLayerBeginFrameInfo{
         .renderTarget = RenderTarget(&m_shadowBuffer.image()),
         .repaint = repaint,
@@ -109,13 +111,20 @@ bool DrmQPainterLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &
         frame->addRenderTimeQuery(std::move(m_renderTime));
     }
 
+    const int bufferAge = m_currentBuffer ? m_currentBuffer->age() : 0;
+    const QRegion blitRegion = renderedRegion.united(
+        m_damageJournal.accumulate(bufferAge, QRegion(QRect(QPoint(0, 0), m_shadowBuffer.image().size())))
+    );
     if (m_currentBuffer && m_currentBuffer->view()) {
-        lindowsBlitDirtyRegion(m_currentBuffer->view()->image(), m_shadowBuffer.image(), renderedRegion);
+        lindowsBlitDirtyRegion(m_currentBuffer->view()->image(), m_shadowBuffer.image(), blitRegion);
+        m_shadowValid = true;
     }
 
-    m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
+    m_currentFramebuffer = m_currentBuffer ? m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{}) : nullptr;
     m_damageJournal.add(damagedRegion);
-    m_swapchain->release(m_currentBuffer);
+    if (m_currentBuffer) {
+        m_swapchain->release(m_currentBuffer);
+    }
 
     if (!m_currentFramebuffer) {
         qCWarning(KWIN_DRM, "Failed to create dumb framebuffer: %s", strerror(errno));
@@ -160,6 +169,7 @@ void DrmQPainterLayer::releaseBuffers()
     m_swapchain.reset();
     m_currentBuffer.reset();
     m_shadowBuffer.free();
+    m_shadowValid = false;
 }
 
 DrmDevice *DrmQPainterLayer::scanoutDevice() const

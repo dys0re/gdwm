@@ -13,16 +13,23 @@ struct gbm_device;
 namespace KWin
 {
 
+class DrmDevice;
+
 class KWIN_EXPORT GbmGraphicsBufferAllocator : public GraphicsBufferAllocator
 {
 public:
+    explicit GbmGraphicsBufferAllocator(DrmDevice *device);
     explicit GbmGraphicsBufferAllocator(gbm_device *device);
     ~GbmGraphicsBufferAllocator() override;
 
     GraphicsBuffer *allocate(const GraphicsBufferOptions &options) override;
 
 private:
-    gbm_device *m_gbmDevice;
+    int drmFd() const;
+    gbm_device *gbmDevice() const;
+
+    DrmDevice *m_drmDevice = nullptr;
+    gbm_device *m_gbmDevice = nullptr;
 };
 
 } // namespace KWin

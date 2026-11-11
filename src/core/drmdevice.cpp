@@ -24,7 +24,8 @@ DrmDevice::DrmDevice(const QString &path, dev_t id, FileDescriptor &&fd, gbm_dev
     , m_id(id)
     , m_fd(std::move(fd))
     , m_gbmDevice(gbmDevice)
-    , m_allocator(std::make_unique<GbmGraphicsBufferAllocator>(gbmDevice))
+    , m_gbmTried(gbmDevice != nullptr)
+    , m_allocator(std::make_unique<GbmGraphicsBufferAllocator>(this))
 {
     uint64_t value = 0;
     m_supportsSyncObjTimelines = drmGetCap(m_fd.get(), DRM_CAP_SYNCOBJ_TIMELINE, &value) == 0 && value != 0;
@@ -32,7 +33,9 @@ DrmDevice::DrmDevice(const QString &path, dev_t id, FileDescriptor &&fd, gbm_dev
 
 DrmDevice::~DrmDevice()
 {
-    gbm_device_destroy(m_gbmDevice);
+    if (m_gbmDevice) {
+        gbm_device_destroy(m_gbmDevice);
+    }
 }
 
 QString DrmDevice::path() const
@@ -47,6 +50,13 @@ dev_t DrmDevice::deviceId() const
 
 gbm_device *DrmDevice::gbmDevice() const
 {
+    if (!m_gbmTried) {
+        m_gbmTried = true;
+        m_gbmDevice = gbm_create_device(m_fd.get());
+        if (!m_gbmDevice) {
+            qCWarning(KWIN_CORE) << "Failed to create gbm device for" << m_path;
+        }
+    }
     return m_gbmDevice;
 }
 
@@ -91,11 +101,6 @@ std::unique_ptr<DrmDevice> DrmDevice::openWithAuthentication(const QString &path
             qCWarning(KWIN_CORE) << "Failed to authenticate the drm magic token. path:" << path << "error:" << strerror(errno);
         }
     }
-    gbm_device *device = gbm_create_device(fd.get());
-    if (!device) {
-        qCWarning(KWIN_CORE) << "Failed to create gbm device for" << path;
-        return nullptr;
-    }
-    return std::unique_ptr<DrmDevice>(new DrmDevice(path, buf.st_rdev, std::move(fd), device));
+    return std::unique_ptr<DrmDevice>(new DrmDevice(path, buf.st_rdev, std::move(fd), nullptr));
 }
 }
