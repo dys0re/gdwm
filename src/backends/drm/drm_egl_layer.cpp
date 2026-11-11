@@ -73,6 +73,9 @@ bool EglGbmLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &damag
 
 bool EglGbmLayer::checkTestBuffer()
 {
+    if (m_scanoutBuffer) {
+        return true;
+    }
     return m_surface.renderTestBuffer(targetRect().size(), m_pipeline->formats(m_type), m_pipeline->output()->colorPowerTradeoff()) != nullptr;
 }
 

@@ -318,7 +318,17 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
     vbo->unmap();
     vbo->bindArrays();
 
-    if (renderContext.hardwareClipping) {
+    const bool useScissor = (region != infiniteRegion() && !region.isEmpty());
+    if (useScissor) {
+        const auto targetSize = renderTarget.size();
+        const auto deviceRect = viewport.mapToRenderTarget(region.boundingRect()).intersected(QRect(QPoint(0, 0), targetSize));
+        if (deviceRect.isEmpty()) {
+            vbo->unbindArrays();
+            return;
+        }
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(deviceRect.x(), targetSize.height() - (deviceRect.y() + deviceRect.height()), deviceRect.width(), deviceRect.height());
+    } else if (renderContext.hardwareClipping) {
         glEnable(GL_SCISSOR_TEST);
     }
 
@@ -420,7 +430,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
 
     setBlendEnabled(false);
 
-    if (renderContext.hardwareClipping) {
+    if (useScissor || renderContext.hardwareClipping) {
         glDisable(GL_SCISSOR_TEST);
     }
 }

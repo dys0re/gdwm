@@ -11,9 +11,11 @@
 
 #include <QList>
 #include <QPoint>
+#include <QRect>
 #include <QSize>
 
 #include <chrono>
+#include <optional>
 #include <xf86drmMode.h>
 
 #include "core/colorpipeline.h"
@@ -180,6 +182,38 @@ private:
     std::unique_ptr<DrmCommitThread> m_commitThread;
     std::shared_ptr<DrmPipelineLayer> m_primaryLayer;
     std::shared_ptr<DrmPipelineLayer> m_cursorLayer;
+
+    struct AtomicTestSignature
+    {
+        DrmCrtc *crtc = nullptr;
+        bool active = false;
+        bool enabled = false;
+        bool needsModeset = false;
+        uint32_t modeBlobId = 0;
+        uint32_t overscan = 0;
+        Output::RgbRange rgbRange = Output::RgbRange::Automatic;
+        DrmConnector::DrmContentType contentType = DrmConnector::DrmContentType::Graphics;
+
+        QRectF primarySourceRect;
+        QRect primaryTargetRect;
+        uint32_t primaryFormat = 0;
+        uint64_t primaryModifier = 0;
+        QSize primaryBufferSize;
+
+        bool cursorEnabled = false;
+        QSize cursorTargetSize;
+        uint32_t cursorFormat = 0;
+        uint64_t cursorModifier = 0;
+        QSize cursorBufferSize;
+
+        bool operator==(const AtomicTestSignature &other) const = default;
+    };
+
+    AtomicTestSignature currentTestSignature() const;
+    void invalidateTestCache();
+
+    std::optional<AtomicTestSignature> m_lastValidatedSignature;
+    bool m_lastTestPassed = false;
 };
 
 }

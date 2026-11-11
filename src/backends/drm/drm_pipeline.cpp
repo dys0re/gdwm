@@ -55,11 +55,12 @@ DrmPipeline::Error DrmPipeline::present(const std::shared_ptr<OutputFrame> &fram
 {
     Q_ASSERT(m_pending.crtc);
     if (gpu()->atomicModeSetting()) {
-        // test the full state, to take pending commits into account
-        if (auto err = DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, frame, {}); err != Error::None) {
-            return err;
+        const auto sig = currentTestSignature();
+        if (!m_lastValidatedSignature.has_value() || *m_lastValidatedSignature != sig || !m_lastTestPassed) {
+            if (auto err = DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, frame, {}); err != Error::None) {
+                return err;
+            }
         }
-        // only give the actual state update to the commit thread, so that it can potentially reorder the commits
         auto primaryPlaneUpdate = std::make_unique<DrmAtomicCommit>(QList<DrmPipeline *>{this});
         if (Error err = prepareAtomicPresentation(primaryPlaneUpdate.get(), frame); err != Error::None) {
             return err;
@@ -93,6 +94,16 @@ DrmPipeline::Error DrmPipeline::commitPipelines(const QList<DrmPipeline *> &pipe
 
 DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *> &pipelines, CommitMode mode, const std::shared_ptr<OutputFrame> &frame, const QList<DrmObject *> &unusedObjects)
 {
+    if ((mode == CommitMode::Test || mode == CommitMode::TestAllowModeset) && pipelines.count() == 1) {
+        DrmPipeline *pipeline = pipelines[0];
+        const auto sig = pipeline->currentTestSignature();
+        if (pipeline->m_lastValidatedSignature.has_value() &&
+            *pipeline->m_lastValidatedSignature == sig &&
+            pipeline->m_lastTestPassed) {
+            return Error::None;
+        }
+    }
+
     auto commit = std::make_unique<DrmAtomicCommit>(pipelines);
     if (mode == CommitMode::Test) {
         // if there's a modeset pending, the tests on top of that state
@@ -114,7 +125,12 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
     }
     switch (mode) {
     case CommitMode::TestAllowModeset: {
-        if (!commit->testAllowModeset()) {
+        const bool ok = commit->testAllowModeset();
+        if (pipelines.count() == 1) {
+            pipelines[0]->m_lastValidatedSignature = pipelines[0]->currentTestSignature();
+            pipelines[0]->m_lastTestPassed = ok;
+        }
+        if (!ok) {
             qCDebug(KWIN_DRM) << "Atomic modeset test failed!" << strerror(errno);
             return errnoToError();
         }
@@ -125,6 +141,8 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
         for (const auto &pipeline : pipelines) {
             pipeline->m_pending.needsModeset = !withoutModeset;
             pipeline->m_pending.needsModesetProperties = true;
+            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature();
+            pipeline->m_lastTestPassed = true;
         }
         return Error::None;
     }
@@ -139,12 +157,19 @@ DrmPipeline::Error DrmPipeline::commitPipelinesAtomic(const QList<DrmPipeline *>
         }
         for (const auto pipeline : pipelines) {
             pipeline->m_next.needsModeset = pipeline->m_pending.needsModeset = false;
+            pipeline->invalidateTestCache();
         }
         commit->pageFlipped(std::chrono::steady_clock::now().time_since_epoch());
         return Error::None;
     }
     case CommitMode::Test: {
-        if (!commit->test()) {
+        const bool ok = commit->test();
+        if (pipelines.count() == 1) {
+            DrmPipeline *pipeline = pipelines[0];
+            pipeline->m_lastValidatedSignature = pipeline->currentTestSignature();
+            pipeline->m_lastTestPassed = ok;
+        }
+        if (!ok) {
             qCDebug(KWIN_DRM) << "Atomic test failed!" << strerror(errno);
             return errnoToError();
         }
@@ -401,9 +426,11 @@ bool DrmPipeline::updateCursor(std::optional<std::chrono::nanoseconds> allowedVr
     }
     // explicitly check for the cursor plane and not for AMS, as we might not always have one
     if (m_pending.crtc->cursorPlane()) {
-        // test the full state, to take pending commits into account
-        if (DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, nullptr, {}) != Error::None) {
-            return false;
+        const auto sig = currentTestSignature();
+        if (!m_lastValidatedSignature.has_value() || *m_lastValidatedSignature != sig || !m_lastTestPassed) {
+            if (DrmPipeline::commitPipelinesAtomic({this}, CommitMode::Test, nullptr, {}) != Error::None) {
+                return false;
+            }
         }
         // only give the actual state update to the commit thread, so that it can potentially reorder the commits
         auto cursorOnly = std::make_unique<DrmAtomicCommit>(QList<DrmPipeline *>{this});
@@ -424,6 +451,12 @@ bool DrmPipeline::amdgpuVrrWorkaroundActive() const
 
 void DrmPipeline::applyPendingChanges()
 {
+    if (m_pending.crtc != m_next.crtc ||
+        m_pending.mode != m_next.mode ||
+        m_pending.active != m_next.active ||
+        m_pending.enabled != m_next.enabled) {
+        invalidateTestCache();
+    }
     m_next = m_pending;
     m_commitThread->setModeInfo(m_pending.mode->refreshRate(), m_pending.mode->vblankTime());
     m_output->renderLoop()->setPresentationSafetyMargin(m_commitThread->safetyMargin());
@@ -526,6 +559,7 @@ bool DrmPipeline::activePending() const
 
 void DrmPipeline::revertPendingChanges()
 {
+    invalidateTestCache();
     m_pending = m_next;
 }
 
@@ -601,6 +635,9 @@ const std::shared_ptr<IccProfile> &DrmPipeline::iccProfile() const
 
 void DrmPipeline::setCrtc(DrmCrtc *crtc)
 {
+    if (m_pending.crtc != crtc) {
+        invalidateTestCache();
+    }
     m_pending.crtc = crtc;
     if (crtc) {
         m_pending.formats = crtc->primaryPlane() ? crtc->primaryPlane()->formats() : legacyFormats;
@@ -611,16 +648,25 @@ void DrmPipeline::setCrtc(DrmCrtc *crtc)
 
 void DrmPipeline::setMode(const std::shared_ptr<DrmConnectorMode> &mode)
 {
+    if (m_pending.mode != mode) {
+        invalidateTestCache();
+    }
     m_pending.mode = mode;
 }
 
 void DrmPipeline::setActive(bool active)
 {
+    if (m_pending.active != active) {
+        invalidateTestCache();
+    }
     m_pending.active = active;
 }
 
 void DrmPipeline::setEnable(bool enable)
 {
+    if (m_pending.enabled != enable) {
+        invalidateTestCache();
+    }
     m_pending.enabled = enable;
 }
 
@@ -727,4 +773,54 @@ std::chrono::nanoseconds DrmPipeline::presentationDeadline() const
 {
     return m_commitThread->safetyMargin();
 }
+
+void DrmPipeline::invalidateTestCache()
+{
+    m_lastValidatedSignature.reset();
+    m_lastTestPassed = false;
+}
+
+DrmPipeline::AtomicTestSignature DrmPipeline::currentTestSignature() const
+{
+    AtomicTestSignature sig;
+    sig.crtc = m_pending.crtc;
+    sig.active = activePending();
+    sig.enabled = m_pending.enabled;
+    sig.needsModeset = needsModeset();
+    sig.modeBlobId = (m_pending.mode && m_pending.mode->blob()) ? m_pending.mode->blob()->blobId() : 0;
+    sig.overscan = m_pending.overscan;
+    sig.rgbRange = m_pending.rgbRange;
+    sig.contentType = m_pending.contentType;
+
+    if (m_primaryLayer) {
+        sig.primarySourceRect = m_primaryLayer->sourceRect();
+        sig.primaryTargetRect = m_primaryLayer->targetRect();
+        if (const auto fb = m_primaryLayer->currentBuffer()) {
+            if (fb->buffer()) {
+                sig.primaryBufferSize = fb->buffer()->size();
+                if (const auto attrs = fb->buffer()->dmabufAttributes()) {
+                    sig.primaryFormat = attrs->format;
+                    sig.primaryModifier = attrs->modifier;
+                }
+            }
+        }
+    }
+
+    if (const auto cursor = cursorLayer()) {
+        sig.cursorEnabled = cursor->isEnabled();
+        sig.cursorTargetSize = cursor->targetRect().size();
+        if (const auto fb = cursor->currentBuffer()) {
+            if (fb->buffer()) {
+                sig.cursorBufferSize = fb->buffer()->size();
+                if (const auto attrs = fb->buffer()->dmabufAttributes()) {
+                    sig.cursorFormat = attrs->format;
+                    sig.cursorModifier = attrs->modifier;
+                }
+            }
+        }
+    }
+
+    return sig;
+}
+
 }

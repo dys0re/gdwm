@@ -354,6 +354,9 @@ std::shared_ptr<GLTexture> EglGbmLayerSurface::texture() const
 
 std::shared_ptr<DrmFramebuffer> EglGbmLayerSurface::renderTestBuffer(const QSize &bufferSize, const QHash<uint32_t, QList<uint64_t>> &formats, Output::ColorPowerTradeoff tradeoff)
 {
+    if (m_surface && doesSurfaceFit(m_surface.get(), bufferSize, formats, tradeoff) && m_surface->currentFramebuffer) {
+        return m_surface->currentFramebuffer;
+    }
     EglContext *context = m_eglBackend->openglContext();
     if (!context->makeCurrent()) {
         qCWarning(KWIN_DRM) << "EglGbmLayerSurface::renderTestBuffer: failed to make opengl context current";
