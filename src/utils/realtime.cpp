@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fcntl.h>
+#include <mutex>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -23,62 +24,58 @@
 namespace KWin
 {
 
+namespace
+{
+void resetChildSchedOnFork()
+{
+    sched_param sp{};
+    sp.sched_priority = 0;
+    sched_setscheduler(0, SCHED_OTHER, &sp);
+    setpriority(PRIO_PROCESS, 0, 0);
+}
+} // namespace
+
 void gainRealTime(int targetPriority)
 {
-    int maxPrio = sched_get_priority_max(SCHED_FIFO);
-    int minPrio = sched_get_priority_min(SCHED_FIFO);
-    if (maxPrio < 0 || minPrio < 0) {
-        maxPrio = 99;
-        minPrio = 1;
-    }
+    static std::once_flag s_atforkOnce;
+    std::call_once(s_atforkOnce, []() {
+        pthread_atfork(nullptr, nullptr, resetChildSchedOnFork);
+    });
 
-    struct rlimit rlimRt;
-    if (getrlimit(RLIMIT_RTPRIO, &rlimRt) == 0 && rlimRt.rlim_cur != RLIM_INFINITY) {
-        if (static_cast<rlim_t>(maxPrio) > rlimRt.rlim_cur) {
-            maxPrio = static_cast<int>(rlimRt.rlim_cur);
+    const long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
+    // On single-core systems, use SCHED_RR so multiple RT compositor/input/DRM threads
+    // time-slice cleanly without FIFO spin-wait priority inversion; on SMP use SCHED_FIFO.
+    const int primaryPolicy = (ncpus <= 1) ? SCHED_RR : SCHED_FIFO;
+    const int secondaryPolicy = (ncpus <= 1) ? SCHED_FIFO : SCHED_RR;
+
+    auto tryPolicy = [&](int basePolicy) -> int {
+        int maxPrio = sched_get_priority_max(basePolicy);
+        int minPrio = sched_get_priority_min(basePolicy);
+        if (maxPrio < 0 || minPrio < 0) {
+            return -1;
         }
-    }
-
-    int ret = -1;
-    if (maxPrio >= minPrio) {
-        const int prio = std::clamp(targetPriority, minPrio, maxPrio);
-        sched_param sp{};
-        sp.sched_priority = prio;
-
-#if defined(HAVE_SCHED_RESET_ON_FORK) && HAVE_SCHED_RESET_ON_FORK
-        ret = pthread_setschedparam(pthread_self(), SCHED_FIFO | SCHED_RESET_ON_FORK, &sp);
-        if (ret != 0)
-#endif
-        {
-            ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-        }
-    }
-
-    if (ret != 0) {
-        // Fallback to SCHED_RR
-        int rrMax = sched_get_priority_max(SCHED_RR);
-        int rrMin = sched_get_priority_min(SCHED_RR);
-        if (rrMax < 0 || rrMin < 0) {
-            rrMax = 99;
-            rrMin = 1;
-        }
+        struct rlimit rlimRt;
         if (getrlimit(RLIMIT_RTPRIO, &rlimRt) == 0 && rlimRt.rlim_cur != RLIM_INFINITY) {
-            if (static_cast<rlim_t>(rrMax) > rlimRt.rlim_cur) {
-                rrMax = static_cast<int>(rlimRt.rlim_cur);
+            if (static_cast<rlim_t>(maxPrio) > rlimRt.rlim_cur) {
+                maxPrio = static_cast<int>(rlimRt.rlim_cur);
             }
         }
-        if (rrMax >= rrMin) {
-            const int prio = std::clamp(targetPriority, rrMin, rrMax);
-            sched_param sp{};
-            sp.sched_priority = prio;
-#if defined(HAVE_SCHED_RESET_ON_FORK) && HAVE_SCHED_RESET_ON_FORK
-            ret = pthread_setschedparam(pthread_self(), SCHED_RR | SCHED_RESET_ON_FORK, &sp);
-            if (ret != 0)
+        if (maxPrio < minPrio) {
+            return -1;
+        }
+        sched_param sp{};
+        sp.sched_priority = std::clamp(targetPriority, minPrio, maxPrio);
+#ifdef SCHED_RESET_ON_FORK
+        if (pthread_setschedparam(pthread_self(), basePolicy | SCHED_RESET_ON_FORK, &sp) == 0) {
+            return 0;
+        }
 #endif
-            {
-                ret = pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
-            }
-        }
+        return pthread_setschedparam(pthread_self(), basePolicy, &sp);
+    };
+
+    int ret = tryPolicy(primaryPolicy);
+    if (ret != 0) {
+        ret = tryPolicy(secondaryPolicy);
     }
 
     if (ret != 0) {

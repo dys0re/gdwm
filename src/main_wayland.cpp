@@ -255,7 +255,6 @@ int main(int argc, char *argv[])
 {
     KWin::Application::setupMalloc();
     KWin::Application::setupLocalizedString();
-    KWin::gainRealTime(50);
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -618,6 +617,7 @@ int main(int argc, char *argv[])
     a.setApplicationsToStart(parser.positionalArguments());
     a.setInputMethodServerToStart(parser.value(inputMethodOption));
     a.start();
+    KWin::gainRealTime(50);
 
     return a.exec();
 }

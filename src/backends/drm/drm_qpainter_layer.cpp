@@ -83,6 +83,15 @@ std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
         if (!m_currentBuffer) {
             return std::nullopt;
         }
+        const QImage::Format qFormat = (m_swapchain->format() == DRM_FORMAT_ARGB8888)
+            ? QImage::Format_ARGB32_Premultiplied
+            : QImage::Format_RGB32;
+        if (m_shadowBuffer.image().isNull() || m_shadowBuffer.image().size() != size || m_shadowBuffer.image().format() != qFormat) {
+            if (!m_shadowBuffer.allocate(size, qFormat)) {
+                return std::nullopt;
+            }
+            m_damageJournal.clear();
+        }
     }
 
     m_renderTime = std::make_unique<CpuRenderTimeQuery>();
