@@ -70,6 +70,9 @@ QString XdgActivationV1Integration::requestToken(bool isPrivileged, SurfaceInter
 {
     auto window = waylandServer()->findWindow(surface);
     if (!isPrivileged) {
+        if (serial == 0) {
+            return QStringLiteral("not-granted-startup");
+        }
         const bool allowed = !workspace()->activeWindow()
             || workspace()->activeWindow()->surface() == surface
             || (input()->lastInteractionSerial() <= serial && waylandServer()->display()->serial() >= serial);
