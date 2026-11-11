@@ -32,6 +32,9 @@ uint32_t DrmQPainterLayer::determineFormat() const
         return m_selectedDrmFormat;
     }
     const auto formats = m_pipeline->formats(m_type);
+    if (m_type == DrmPlane::TypeIndex::Primary && formats.contains(DRM_FORMAT_XRGB8888)) {
+        return DRM_FORMAT_XRGB8888;
+    }
     if (formats.contains(DRM_FORMAT_ARGB8888)) {
         return DRM_FORMAT_ARGB8888;
     }

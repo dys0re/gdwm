@@ -262,9 +262,68 @@ inline void lindowsBlitDirtyRegion(QImage *dst, const QImage &src, const QRegion
                            dirtyRegion, bounds);
 }
 
-// Premultiplied alpha single-pixel blend helper (scalar fallback)
-inline uint32_t blendPixelPremulScalar(uint32_t src, uint32_t dst, int opacity256, bool dstIsRGB32)
+// 128-bit SIMD burst row copy ensuring opaque 0xFF alpha byte (for Format_RGB32 / XRGB8888 sources)
+inline void lindowsCopyRowOpaque32(uint8_t *dst, const uint8_t *src, size_t pixels)
 {
+    const size_t bytes = pixels * 4;
+#if defined(__SSE2__)
+    const __m128i alpha_mask = _mm_set1_epi32(static_cast<int>(0xFF000000u));
+    size_t i = 0;
+    for (; i + 64 <= bytes; i += 64) {
+        __m128i r0 = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i)), alpha_mask);
+        __m128i r1 = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i + 16)), alpha_mask);
+        __m128i r2 = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i + 32)), alpha_mask);
+        __m128i r3 = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i + 48)), alpha_mask);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i), r0);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i + 16), r1);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i + 32), r2);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i + 48), r3);
+    }
+    for (; i + 16 <= bytes; i += 16) {
+        __m128i r = _mm_or_si128(_mm_loadu_si128(reinterpret_cast<const __m128i *>(src + i)), alpha_mask);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + i), r);
+    }
+    for (; i + 4 <= bytes; i += 4) {
+        *reinterpret_cast<uint32_t *>(dst + i) = *reinterpret_cast<const uint32_t *>(src + i) | 0xFF000000u;
+    }
+#elif defined(__aarch64__)
+    const uint32x4_t alpha_mask = vdupq_n_u32(0xFF000000u);
+    size_t i = 0;
+    for (; i + 64 <= bytes; i += 64) {
+        uint32x4_t r0 = vorrq_u32(vld1q_u32(reinterpret_cast<const uint32_t *>(src + i)), alpha_mask);
+        uint32x4_t r1 = vorrq_u32(vld1q_u32(reinterpret_cast<const uint32_t *>(src + i + 16)), alpha_mask);
+        uint32x4_t r2 = vorrq_u32(vld1q_u32(reinterpret_cast<const uint32_t *>(src + i + 32)), alpha_mask);
+        uint32x4_t r3 = vorrq_u32(vld1q_u32(reinterpret_cast<const uint32_t *>(src + i + 48)), alpha_mask);
+        vst1q_u32(reinterpret_cast<uint32_t *>(dst + i), r0);
+        vst1q_u32(reinterpret_cast<uint32_t *>(dst + i + 16), r1);
+        vst1q_u32(reinterpret_cast<uint32_t *>(dst + i + 32), r2);
+        vst1q_u32(reinterpret_cast<uint32_t *>(dst + i + 48), r3);
+    }
+    for (; i + 16 <= bytes; i += 16) {
+        uint32x4_t r = vorrq_u32(vld1q_u32(reinterpret_cast<const uint32_t *>(src + i)), alpha_mask);
+        vst1q_u32(reinterpret_cast<uint32_t *>(dst + i), r);
+    }
+    for (; i + 4 <= bytes; i += 4) {
+        *reinterpret_cast<uint32_t *>(dst + i) = *reinterpret_cast<const uint32_t *>(src + i) | 0xFF000000u;
+    }
+#else
+    uint32_t *d32 = reinterpret_cast<uint32_t *>(dst);
+    const uint32_t *s32 = reinterpret_cast<const uint32_t *>(src);
+    for (size_t p = 0; p < pixels; ++p) {
+        d32[p] = s32[p] | 0xFF000000u;
+    }
+#endif
+}
+
+// Premultiplied alpha single-pixel blend helper (scalar fallback)
+inline uint32_t blendPixelPremulScalar(uint32_t src, uint32_t dst, int opacity256, bool srcIsRGB32, bool dstIsRGB32)
+{
+    if (srcIsRGB32) {
+        src |= 0xFF000000u;
+    } else if (src == 0) {
+        return dstIsRGB32 ? (dst | 0xFF000000u) : dst;
+    }
+
     if (opacity256 < 256) {
         const uint32_t a = (((src >> 24) & 0xff) * opacity256) >> 8;
         const uint32_t r = (((src >> 16) & 0xff) * opacity256) >> 8;
@@ -274,10 +333,10 @@ inline uint32_t blendPixelPremulScalar(uint32_t src, uint32_t dst, int opacity25
     }
     const uint32_t sa = (src >> 24) & 0xff;
     if (sa == 0) {
-        return dstIsRGB32 ? (dst | 0xFF000000) : dst;
+        return dstIsRGB32 ? (dst | 0xFF000000u) : dst;
     }
     if (sa == 255) {
-        return dstIsRGB32 ? (src | 0xFF000000) : src;
+        return dstIsRGB32 ? (src | 0xFF000000u) : src;
     }
     const uint32_t invA = 256 - sa;
     const uint32_t da = (dst >> 24) & 0xff;
@@ -304,11 +363,18 @@ inline uint32_t blendPixelPremulScalar(uint32_t src, uint32_t dst, int opacity25
 
 #if defined(__SSE2__)
 // 4-pixel premultiplied alpha blend with all_zero skip and all_opaque direct store
-inline void lindowsBlend4PixelsSSE2(uint32_t *dPtr, __m128i vsrc, int opacity256, bool dstIsRGB32)
+inline void lindowsBlend4PixelsSSE2(uint32_t *dPtr, __m128i vsrc, int opacity256, bool srcIsRGB32, bool dstIsRGB32)
 {
-    // Fast-skip when all 4 source pixels are completely transparent (0x00000000)
-    if (_mm_movemask_epi8(_mm_cmpeq_epi32(vsrc, _mm_setzero_si128())) == 0xFFFF) {
-        return;
+    const __m128i alpha_mask = _mm_set1_epi32(static_cast<int>(0xFF000000u));
+    if (srcIsRGB32) {
+        // XRGB8888 / Format_RGB32 buffers carry undefined (often 0x00) top bytes;
+        // enforce opaque alpha before zero-skip or opacity scaling.
+        vsrc = _mm_or_si128(vsrc, alpha_mask);
+    } else {
+        // Fast-skip when all 4 ARGB source pixels are completely transparent (0x00000000)
+        if (_mm_movemask_epi8(_mm_cmpeq_epi32(vsrc, _mm_setzero_si128())) == 0xFFFF) {
+            return;
+        }
     }
 
     // Scale src channels by opacity256 if opacity < 256
@@ -327,7 +393,6 @@ inline void lindowsBlend4PixelsSSE2(uint32_t *dPtr, __m128i vsrc, int opacity256
     }
 
     // Fast-store when all 4 source pixels are completely opaque (alpha == 0xFF)
-    __m128i alpha_mask = _mm_set1_epi32(0xFF000000);
     __m128i alphas = _mm_and_si128(vsrc, alpha_mask);
     if (_mm_movemask_epi8(_mm_cmpeq_epi32(alphas, alpha_mask)) == 0xFFFF) {
         _mm_storeu_si128(reinterpret_cast<__m128i *>(dPtr), vsrc);
@@ -381,6 +446,7 @@ inline void lindowsBlendRegionSimd(QImage *dst,
         return;
     }
 
+    const bool srcIsRGB32 = (src.format() == QImage::Format_RGB32);
     const bool dstIsRGB32 = (dst->format() == QImage::Format_RGB32);
 
     const QRect srcBounds(srcX, srcY, width, height);
@@ -416,7 +482,11 @@ inline void lindowsBlendRegionSimd(QImage *dst,
                 const int sx = srcX + (rx - dstX);
                 uint8_t *d = dst->scanLine(y) + static_cast<size_t>(rx) * 4;
                 const uint8_t *s = src.constScanLine(sy) + static_cast<size_t>(sx) * 4;
-                lindowsCopyRow128(d, s, static_cast<size_t>(rw) * 4);
+                if (srcIsRGB32) {
+                    lindowsCopyRowOpaque32(d, s, static_cast<size_t>(rw));
+                } else {
+                    lindowsCopyRow128(d, s, static_cast<size_t>(rw) * 4);
+                }
             }
         }
         return;
@@ -443,11 +513,11 @@ inline void lindowsBlendRegionSimd(QImage *dst,
 #if defined(__SSE2__)
             for (; x + 4 <= rw; x += 4) {
                 __m128i vsrc = _mm_loadu_si128(reinterpret_cast<const __m128i *>(sPtr + x));
-                lindowsBlend4PixelsSSE2(dPtr + x, vsrc, opacity256, dstIsRGB32);
+                lindowsBlend4PixelsSSE2(dPtr + x, vsrc, opacity256, srcIsRGB32, dstIsRGB32);
             }
 #endif
             for (; x < rw; ++x) {
-                dPtr[x] = blendPixelPremulScalar(sPtr[x], dPtr[x], opacity256, dstIsRGB32);
+                dPtr[x] = blendPixelPremulScalar(sPtr[x], dPtr[x], opacity256, srcIsRGB32, dstIsRGB32);
             }
         }
     }
@@ -473,6 +543,7 @@ inline void lindowsScaleBlitSimd(QImage *dst,
         return;
     }
 
+    const bool srcIsRGB32 = (src.format() == QImage::Format_RGB32);
     const bool dstIsRGB32 = (dst->format() == QImage::Format_RGB32);
     const int srcW = src.width();
     const int srcH = src.height();
@@ -548,13 +619,13 @@ inline void lindowsScaleBlitSimd(QImage *dst,
                     uint32_t p3 = srcRow[su3];
 
                     __m128i vsrc = _mm_set_epi32(p3, p2, p1, p0);
-                    lindowsBlend4PixelsSSE2(dstRow + x, vsrc, opacity256, dstIsRGB32);
+                    lindowsBlend4PixelsSSE2(dstRow + x, vsrc, opacity256, srcIsRGB32, dstIsRGB32);
                 }
 #endif
                 for (; x < rw; ++x) {
                     int su = std::clamp(static_cast<int>(u_fp >> 16), 0, srcW - 1);
                     u_fp += du_fp;
-                    dstRow[x] = blendPixelPremulScalar(srcRow[su], dstRow[x], opacity256, dstIsRGB32);
+                    dstRow[x] = blendPixelPremulScalar(srcRow[su], dstRow[x], opacity256, srcIsRGB32, dstIsRGB32);
                 }
             }
         }

@@ -50,122 +50,33 @@ void ItemRendererQPainter::beginFrame(const RenderTarget &renderTarget, const Re
     m_targetImage = buffer;
     m_painter->begin(buffer);
     m_painter->setWindow(viewport.renderRect().toRect());
-
-    m_backgroundOcclusion = QRegion();
-    m_occludedByAbove.clear();
-
-    const bool fullScreenEffect = effects && effects->hasActiveFullScreenEffect();
-    if (workspace()) {
-        const auto &windows = workspace()->stackingOrder();
-
-        // Prune destroyed/stale items from transformed set
-        QSet<const Item *> activeItems;
-        for (Window *w : windows) {
-            if (w && w->windowItem()) {
-                activeItems.insert(w->windowItem());
-            }
-        }
-        m_transformedItems.intersect(activeItems);
-
-        QRegion currentOcclusion;
-        // Traverse stacking order from top-most to bottom-most window
-        for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
-            Window *window = *it;
-            if (!window || !window->isShown() || window->isMinimized() || window->isDeleted() || window->isShade()) {
-                continue;
-            }
-            if (window->opacity() < 0.999f) {
-                continue;
-            }
-
-            WindowItem *windowItem = window->windowItem();
-            if (!windowItem || !windowItem->isVisible()) {
-                continue;
-            }
-
-            const bool windowAnimating = m_transformedItems.contains(windowItem);
-
-            SurfaceItem *surfaceItem = window->surfaceItem();
-            QRegion winOpaque;
-            if (surfaceItem && surfaceItem->pixmap() && surfaceItem->pixmap()->isValid()) {
-                if (window->isDesktop() || !surfaceItem->pixmap()->hasAlphaChannel()) {
-                    winOpaque = surfaceItem->mapToScene(QRectF(QPointF(0, 0), surfaceItem->destinationSize())).toAlignedRect();
-                } else {
-                    winOpaque = surfaceItem->mapToScene(surfaceItem->opaque());
-                }
-            }
-
-            if (DecorationItem *decorationItem = windowItem->decorationItem()) {
-                winOpaque += decorationItem->mapToScene(decorationItem->opaque());
-            }
-
-            if (!winOpaque.isEmpty()) {
-                if (!window->isDesktop()) {
-                    if (!currentOcclusion.isEmpty()) {
-                        m_occludedByAbove[windowItem] = currentOcclusion;
-                    }
-                    if (!windowAnimating && !fullScreenEffect) {
-                        currentOcclusion += winOpaque;
-                    }
-                } else {
-                    // Desktop window is at the bottom of the stack; it never occludes other windows,
-                    // but it occludes the background unless a full-screen effect is running
-                    if (!fullScreenEffect) {
-                        currentOcclusion += winOpaque;
-                    }
-                }
-            }
-        }
-        if (!fullScreenEffect) {
-            m_backgroundOcclusion = currentOcclusion;
-        }
-    }
 }
 
 void ItemRendererQPainter::endFrame()
 {
     m_painter->end();
     m_targetImage = nullptr;
-    m_backgroundOcclusion = QRegion();
-    m_occludedByAbove.clear();
 }
 
 void ItemRendererQPainter::renderBackground(const RenderTarget &renderTarget, const RenderViewport &viewport, const QRegion &region)
 {
-    const QRegion culledRegion = region - m_backgroundOcclusion;
-    if (culledRegion.isEmpty()) {
+    if (region.isEmpty()) {
         return;
     }
 
     m_painter->setCompositionMode(QPainter::CompositionMode_Source);
-    for (const QRect &rect : culledRegion) {
-        m_painter->fillRect(rect, Qt::transparent);
+    const QColor clearColor = (m_targetImage && m_targetImage->format() == QImage::Format_RGB32)
+        ? Qt::black
+        : Qt::transparent;
+    for (const QRect &rect : region) {
+        m_painter->fillRect(rect, clearColor);
     }
     m_painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
 }
 
 void ItemRendererQPainter::renderItem(const RenderTarget &renderTarget, const RenderViewport &viewport, Item *item, int mask, const QRegion &_region, const WindowPaintData &data)
 {
-    const bool isTransformed = (mask & (Scene::PAINT_WINDOW_TRANSFORMED | Scene::PAINT_SCREEN_TRANSFORMED))
-        || (data.opacity() < 0.999f)
-        || (data.xScale() != 1.0) || (data.yScale() != 1.0)
-        || (data.xTranslation() != 0.0) || (data.yTranslation() != 0.0);
-
-    if (isTransformed) {
-        m_transformedItems.insert(item);
-    } else {
-        m_transformedItems.remove(item);
-    }
-
     QRegion region = _region;
-
-    // Occlusion culling: subtract opaque regions of windows above this item
-    if (!m_occludedByAbove.isEmpty()) {
-        auto it = m_occludedByAbove.find(item);
-        if (it != m_occludedByAbove.end()) {
-            region -= it.value();
-        }
-    }
 
     const QRect boundingRect = item->mapToScene(item->boundingRect()).toAlignedRect();
     if (!(mask & (Scene::PAINT_WINDOW_TRANSFORMED | Scene::PAINT_SCREEN_TRANSFORMED))) {
