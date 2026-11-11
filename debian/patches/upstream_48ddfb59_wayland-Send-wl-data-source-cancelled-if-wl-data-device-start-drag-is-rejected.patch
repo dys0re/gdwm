@@ -1,0 +1,38 @@
+From 48ddfb592d1c84000936857a8a752fc2efec4c54 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Wed, 4 Jun 2025 20:25:49 +0000
+Subject: [PATCH] wayland: Send wl_data_source.cancelled if
+ wl_data_device.start_drag is rejected
+
+If a dnd operation is rejected by the start_drag request, currently, the
+client has no any feedback about it.
+
+This change makes kwin send a wl_data_source.cancelled similar to what
+weston does. Note that with internal drags, no feedback will still be
+provided though.
+
+
+(cherry picked from commit d9249be845b788b1e22e9944468c26612d37730b)
+
+Co-authored-by: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+---
+ src/wayland/datadevice.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/wayland/datadevice.cpp b/src/wayland/datadevice.cpp
+index 1becb8290df..eb514528752 100644
+--- a/src/wayland/datadevice.cpp
++++ b/src/wayland/datadevice.cpp
+@@ -96,6 +96,9 @@ void DataDeviceInterfacePrivate::data_device_start_drag(Resource *resource,
+         const bool touchGrab = seat->hasImplicitTouchGrab(serial) && seat->isSurfaceTouched(focusSurface);
+         if (!touchGrab) {
+             // Client neither has pointer nor touch grab. No drag start allowed.
++            if (dataSource) {
++                dataSource->dndCancelled();
++            }
+             return;
+         }
+     }
+-- 
+GitLab
+

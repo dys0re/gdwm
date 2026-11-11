@@ -1,0 +1,52 @@
+From e8541cf2233d22fa255da85eb12ffcbb7ca227e0 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Wed, 9 Jul 2025 12:59:15 +0000
+Subject: [PATCH] wayland: Fix resizing with fractional increments
+
+Rounded client sizes are checked, which is okay if we want to determine
+whether the window geometries match. But it doesn't mean that the
+requested frame size can be used.
+
+We need to run nextClientSizeToFrameSize() on top to make sure that the
+frame tightly wraps the surface.
+
+For example, consider that the rect.width() is 10.5 and the target scale
+factor is 2. If there are no borders, the requested client size will be
+11. If the current client size happens to be 11 as well, then the final
+frame geometry will have 10.5 width, which is totally incorrect, it has
+to be 11. If kwin uses 10.5 width, then the outline around the window
+may not have uniform thickness.
+
+During interactive resize, the snapped geometry also needs to be
+gravitated so when you drag the left edge of the window, the right edge
+doesn't move left and right chaotically.
+
+(cherry picked from commit 5b7abb00a3cbbf4084683c9a2070970d0897a39a)
+
+Co-authored-by: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+---
+ src/xdgshellwindow.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/xdgshellwindow.cpp b/src/xdgshellwindow.cpp
+index 42c3d8b595e..9d529d5da74 100644
+--- a/src/xdgshellwindow.cpp
++++ b/src/xdgshellwindow.cpp
+@@ -271,8 +271,12 @@ void XdgSurfaceWindow::moveResizeInternal(const QRectF &rect, MoveResizeMode mod
+         // and current client sizes have to be rounded to integers
+         const QSizeF requestedFrameSize = snapToPixels(rect.size(), nextTargetScale());
+         const QSizeF requestedClientSize = nextFrameSizeToClientSize(requestedFrameSize);
+-        if (requestedClientSize.toSize() == clientSize().toSize()) {
+-            updateGeometry(QRectF(rect.topLeft(), requestedFrameSize));
++        const QSize roundedRequestedClientSize = requestedClientSize.toSize();
++
++        const QSize roundedClientSize = clientSize().toSize();
++        if (roundedRequestedClientSize == roundedClientSize) {
++            const QRectF snappedRect = QRectF(rect.topLeft(), nextClientSizeToFrameSize(snapToPixels(roundedClientSize, nextTargetScale())));
++            updateGeometry(gravitateGeometry(snappedRect, rect, m_nextGravity));
+         } else {
+             m_configureFlags |= XdgSurfaceConfigure::ConfigurePosition;
+             scheduleConfigure();
+-- 
+GitLab
+

@@ -1,0 +1,151 @@
+From 51c0880f47ecd2e29ceb61e9dd9b30a535d18ff8 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Wed, 9 Jul 2025 12:22:28 +0000
+Subject: [PATCH] wayland: close popups upon window activation
+
+Popups should grab all input on Wayland, however there are numerous
+(deliberate) ways to get outside the grab, such as a shortcut that opens
+a new window or pressing alt-tab.
+
+If a popup is active when the focus changes we are left in a state where
+the new window visibly has focus and appears on top of the popup's main
+window, but the popup is still visible with an input grab. This is a
+broken state.
+
+This patch cancels popups if the focus window changes for whatever
+reason.
+
+Cancelling a popup also destroys the window server side rather than
+waiting for the client to handle the popupDone so there is no racey
+aspect for the next input.
+
+BUG: 497075
+
+
+(cherry picked from commit 43f7621eb1ef22704c4c12c21c29945bffa37e47)
+
+Co-authored-by: David Edmundson <kde@davidedmundson.co.uk>
+---
+ autotests/integration/xdgshellwindow_test.cpp | 45 +++++++++++++++++++
+ src/popup_input_filter.cpp                    |  7 +++
+ src/popup_input_filter.h                      |  2 +-
+ 3 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/autotests/integration/xdgshellwindow_test.cpp b/autotests/integration/xdgshellwindow_test.cpp
+index b7d3946b97f..0903043808d 100644
+--- a/autotests/integration/xdgshellwindow_test.cpp
++++ b/autotests/integration/xdgshellwindow_test.cpp
+@@ -13,6 +13,7 @@
+ #include "decorations/decorationbridge.h"
+ #include "decorations/settings.h"
+ #include "pointer_input.h"
++
+ #include "virtualdesktops.h"
+ #include "wayland/clientconnection.h"
+ #include "wayland/display.h"
+@@ -41,6 +42,8 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <linux/input.h>
++
+ #include <csignal>
+ 
+ using namespace KWin;
+@@ -111,6 +114,7 @@ private Q_SLOTS:
+     void testCloseInactiveModal();
+     void testClosePopupOnParentUnmapped();
+     void testPopupWithDismissedParent();
++    void testPopupDismissedOnFocusChange();
+     void testMinimumSize();
+     void testNoMinimumSize();
+     void testMaximumSize();
+@@ -2417,6 +2421,47 @@ void TestXdgShellWindow::testPopupWithDismissedParent()
+     QVERIFY(grandChildDoneSpy.wait());
+ }
+ 
++void TestXdgShellWindow::testPopupDismissedOnFocusChange()
++{
++    // This test verifies that a popup window will be dismissed when the focus changes.
++
++    std::unique_ptr<KWayland::Client::Surface> parentSurface = Test::createSurface();
++    std::unique_ptr<Test::XdgToplevel> parentToplevel = Test::createXdgToplevelSurface(parentSurface.get());
++    std::unique_ptr<KWayland::Client::Pointer> pointer(Test::waylandSeat()->createPointer());
++    Window *parent = Test::renderAndWaitForShown(parentSurface.get(), QSize(200, 200), Qt::cyan);
++    QVERIFY(parent);
++
++    QSignalSpy buttonSpy(pointer.get(), &KWayland::Client::Pointer::buttonStateChanged);
++    input()->pointer()->warp(parent->frameGeometry().center());
++    // simulate press
++    quint32 timestamp = 1;
++    Test::pointerButtonPressed(BTN_LEFT, timestamp++);
++    QVERIFY(buttonSpy.wait());
++
++    std::unique_ptr<Test::XdgPositioner> positioner = Test::createXdgPositioner();
++    positioner->set_size(10, 10);
++    positioner->set_anchor_rect(10, 10, 10, 10);
++
++    std::unique_ptr<KWayland::Client::Surface> childSurface = Test::createSurface();
++    std::unique_ptr<Test::XdgPopup> popup = Test::createXdgPopupSurface(childSurface.get(), parentToplevel->xdgSurface(), positioner.get());
++    popup->grab(*Test::waylandSeat(), buttonSpy.first().first().value<quint32>());
++    QPointer<Window> child = Test::renderAndWaitForShown(childSurface.get(), QSize(10, 10), Qt::cyan);
++    QVERIFY(child);
++
++    QSignalSpy popupDismissedSpy(popup.get(), &Test::XdgPopup::doneReceived);
++
++    // create another toplevel that gets focus
++    std::unique_ptr<KWayland::Client::Surface> otherSurface = Test::createSurface();
++    std::unique_ptr<Test::XdgToplevel> otherToplevel = Test::createXdgToplevelSurface(otherSurface.get());
++    Window *other = Test::renderAndWaitForShown(otherSurface.get(), QSize(200, 200), Qt::cyan);
++    QVERIFY(other);
++
++    workspace()->setActiveWindow(other);
++
++    QVERIFY(popupDismissedSpy.wait());
++    QVERIFY(!child); // and the server-side window closed immediately too
++}
++
+ void TestXdgShellWindow::testMinimumSize()
+ {
+     // NOTE: a minimum size of 20px is forced by the compositor
+diff --git a/src/popup_input_filter.cpp b/src/popup_input_filter.cpp
+index 50e47d07021..0fd1d602c3e 100644
+--- a/src/popup_input_filter.cpp
++++ b/src/popup_input_filter.cpp
+@@ -24,6 +24,7 @@ PopupInputFilter::PopupInputFilter()
+     , InputEventFilter(InputFilterOrder::Popup)
+ {
+     connect(workspace(), &Workspace::windowAdded, this, &PopupInputFilter::handleWindowAdded);
++    connect(workspace(), &Workspace::windowActivated, this, &PopupInputFilter::handleWindowFocusChanged);
+ }
+ 
+ void PopupInputFilter::handleWindowAdded(Window *window)
+@@ -48,6 +49,12 @@ void PopupInputFilter::handleWindowAdded(Window *window)
+     }
+ }
+ 
++void PopupInputFilter::handleWindowFocusChanged()
++{
++    // user focussed a window through another mechanism such as a shortcut
++    cancelPopups();
++}
++
+ bool PopupInputFilter::pointerButton(PointerButtonEvent *event)
+ {
+     if (m_popupWindows.isEmpty()) {
+diff --git a/src/popup_input_filter.h b/src/popup_input_filter.h
+index 0950666fa8b..622f62b5ccf 100644
+--- a/src/popup_input_filter.h
++++ b/src/popup_input_filter.h
+@@ -27,7 +27,7 @@ public:
+ 
+ private:
+     void handleWindowAdded(Window *client);
+-
++    void handleWindowFocusChanged();
+     void focus(Window *popup);
+     void cancelPopups();
+ 
+-- 
+GitLab
+

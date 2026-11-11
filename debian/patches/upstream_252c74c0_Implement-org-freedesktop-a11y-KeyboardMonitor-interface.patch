@@ -1,0 +1,474 @@
+From 252c74c0ee77d8eec1e303233d045413d0be03fd Mon Sep 17 00:00:00 2001
+From: Nicolas Fella <nicolas.fella@gmx.de>
+Date: Thu, 6 Mar 2025 12:42:43 +0100
+Subject: [PATCH] Implement org.freedesktop.a11y.KeyboardMonitor interface
+
+This allows screen readers to intercept keys for their own
+shortcut handling.
+
+This is not a regular input filter since we need to be able to
+intercept keys before they change the XKB state.
+---
+ src/CMakeLists.txt           |   1 +
+ src/a11ykeyboardmonitor.cpp  | 194 +++++++++++++++++++++++++++++++++++
+ src/a11ykeyboardmonitor.h    |  70 +++++++++++++
+ src/keyboard_input.cpp       |   5 +
+ src/keyboard_input.h         |   2 +
+ src/org.freedesktop.a11y.xml | 119 +++++++++++++++++++++
+ 6 files changed, 391 insertions(+)
+ create mode 100644 src/a11ykeyboardmonitor.cpp
+ create mode 100644 src/a11ykeyboardmonitor.h
+ create mode 100644 src/org.freedesktop.a11y.xml
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 246441da77e..04e6718b7b6 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -29,6 +29,7 @@ target_compile_definitions(kwin PRIVATE
+ 
+ target_sources(kwin PRIVATE
+     3rdparty/xcursor.c
++    a11ykeyboardmonitor.cpp
+     activation.cpp
+     appmenu.cpp
+     client_machine.cpp
+diff --git a/src/a11ykeyboardmonitor.cpp b/src/a11ykeyboardmonitor.cpp
+new file mode 100644
+index 00000000000..feaa85cb17e
+--- /dev/null
++++ b/src/a11ykeyboardmonitor.cpp
+@@ -0,0 +1,194 @@
++/*
++    SPDX-FileCopyrightText: 2025 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include "a11ykeyboardmonitor.h"
++#include "keyboard_input.h"
++#include "wayland/keyboard.h"
++#include "wayland/seat.h"
++#include "wayland_server.h"
++#include "xkb.h"
++
++#include <QDBusConnection>
++#include <QDBusConnectionInterface>
++#include <QDBusMetaType>
++#include <QDBusServiceWatcher>
++
++using namespace std::literals;
++
++namespace KWin
++{
++
++A11yKeyboardMonitor::A11yKeyboardMonitor()
++    : QObject()
++{
++    qDBusRegisterMetaType<A11yKeyboardMonitor::KeyStroke>();
++    qDBusRegisterMetaType<QList<A11yKeyboardMonitor::KeyStroke>>();
++
++    m_dbusWatcher.setConnection(QDBusConnection::sessionBus());
++    m_dbusWatcher.setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
++
++    connect(&m_dbusWatcher, &QDBusServiceWatcher::serviceUnregistered, this, [this](const QString &serviceName) {
++        m_clients.remove(serviceName);
++    });
++
++    QDBusConnection::sessionBus().registerObject(QStringLiteral("/org/freedesktop/a11y/Manager"), this, QDBusConnection::ExportScriptableContents);
++    QDBusConnection::sessionBus().registerService(QStringLiteral("org.freedesktop.a11y.Manager"));
++}
++
++bool A11yKeyboardMonitor::processKey(uint32_t key, KeyboardKeyState state, std::chrono::microseconds time)
++{
++    const auto mods = xkb_state_serialize_mods(input()->keyboard()->xkb()->state(), xkb_state_component(XKB_STATE_MODS_EFFECTIVE));
++
++    const auto keysym = input()->keyboard()->xkb()->toKeysym(key);
++    const auto text = input()->keyboard()->xkb()->toString(keysym);
++    const quint32 unicode = text.isEmpty() ? 0 : text.at(0).unicode();
++    const bool released = state == KeyboardKeyState::Released;
++
++    for (auto [name, data] : m_clients.asKeyValueRange()) {
++        if (data.grabbed) {
++            emitKeyEvent(name, released, mods, keysym, unicode, key);
++        }
++
++        // if the modifier was pressed twice within the key repeat delay process it normally
++        const qint32 keyRepeatDelay = waylandServer()->seat()->keyboard()->keyRepeatDelay();
++        if (state == KeyboardKeyState::Pressed && data.lastModifier == keysym && time < data.lastModifierTime + std::chrono::milliseconds(keyRepeatDelay)) {
++            data.modifierWasForwarded = true;
++            return false;
++        }
++
++        // if the modifier press was forwarded also forward the release
++        if (state == KeyboardKeyState::Released && data.modifierWasForwarded) {
++            data.modifierWasForwarded = false;
++            return false;
++        }
++
++        data.lastModifier = keysym;
++        data.lastModifierTime = time;
++
++        if (data.modifiers.contains(keysym)) {
++            emitKeyEvent(name, released, mods, keysym, unicode, key);
++            return true;
++        }
++
++        for (const KeyStroke &stroke : std::as_const(data.keys)) {
++            if (mods == stroke.modifiers && stroke.keysym == keysym) {
++                emitKeyEvent(name, released, mods, keysym, unicode, key);
++                return true;
++            }
++        }
++
++        if (data.watched) {
++            emitKeyEvent(name, released, mods, keysym, unicode, key);
++        }
++    }
++
++    return false;
++}
++
++void A11yKeyboardMonitor::GrabKeyboard()
++{
++    if (!checkPermission()) {
++        return;
++    }
++
++    m_dbusWatcher.addWatchedService(message().service());
++
++    m_clients[message().service()].grabbed = true;
++}
++
++void A11yKeyboardMonitor::UngrabKeyboard()
++{
++    if (!checkPermission()) {
++        return;
++    }
++
++    if (!m_clients.contains(message().service())) {
++        return;
++    }
++
++    m_clients[message().service()].grabbed = false;
++}
++
++void A11yKeyboardMonitor::WatchKeyboard()
++{
++    if (!checkPermission()) {
++        return;
++    }
++
++    m_dbusWatcher.addWatchedService(message().service());
++
++    m_clients[message().service()].watched = true;
++}
++
++void A11yKeyboardMonitor::UnwatchKeyboard()
++{
++    if (!checkPermission()) {
++        return;
++    }
++
++    if (!m_clients.contains(message().service())) {
++        return;
++    }
++
++    m_clients[message().service()].watched = false;
++}
++
++void A11yKeyboardMonitor::SetKeyGrabs(const QList<quint32> &modifiers, const QList<A11yKeyboardMonitor::KeyStroke> &keystrokes)
++{
++    if (!checkPermission()) {
++        return;
++    }
++
++    m_dbusWatcher.addWatchedService(message().service());
++
++    m_clients[message().service()].modifiers = modifiers;
++    m_clients[message().service()].keys = keystrokes;
++}
++
++void A11yKeyboardMonitor::emitKeyEvent(const QString &name, bool released, quint32 state, quint32 keysym, quint32 unichar, quint16 keycode)
++{
++    QDBusMessage signal = QDBusMessage::createTargetedSignal(name, QStringLiteral("/org/freedesktop/a11y/Manager"), QStringLiteral("org.freedesktop.a11y.KeyboardMonitor"), QStringLiteral("KeyEvent"));
++    QVariant keycodeVariant;
++    keycodeVariant.setValue(keycode);
++    signal.setArguments({released, state, keysym, unichar, keycodeVariant});
++    QDBusConnection::sessionBus().call(signal, QDBus::NoBlock);
++}
++
++bool A11yKeyboardMonitor::checkPermission()
++{
++    QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"), QStringLiteral("org.freedesktop.DBus"), "GetNameOwner");
++    msg.setArguments({QStringLiteral("org.gnome.Orca.KeyboardMonitor")});
++    QDBusReply<QString> orcaName = QDBusConnection::sessionBus().call(msg);
++
++    if (message().service() != orcaName) {
++        sendErrorReply(QDBusError::AccessDenied, "Only screen readers are allowed to use this interface");
++        return false;
++    }
++
++    return true;
++}
++
++const QDBusArgument &operator>>(const QDBusArgument &arg, A11yKeyboardMonitor::KeyStroke &keystroke)
++{
++    arg.beginStructure();
++    arg >> keystroke.keysym;
++    arg >> keystroke.modifiers;
++    arg.endStructure();
++
++    return arg;
++}
++
++const QDBusArgument &operator<<(QDBusArgument &arg, const A11yKeyboardMonitor::KeyStroke &keystroke)
++{
++    arg.beginStructure();
++    arg << keystroke.keysym;
++    arg << keystroke.modifiers;
++    arg.endStructure();
++
++    return arg;
++}
++
++}
+diff --git a/src/a11ykeyboardmonitor.h b/src/a11ykeyboardmonitor.h
+new file mode 100644
+index 00000000000..3fbee438c6e
+--- /dev/null
++++ b/src/a11ykeyboardmonitor.h
+@@ -0,0 +1,70 @@
++/*
++    SPDX-FileCopyrightText: 2025 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#pragma once
++
++#include "input.h"
++#include "input_event.h"
++
++#include <QDBusArgument>
++#include <QDBusContext>
++#include <QDBusServiceWatcher>
++
++namespace KWin
++{
++
++class A11yKeyboardMonitor : public QObject, protected QDBusContext
++{
++    Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.a11y.KeyboardMonitor")
++public:
++    explicit A11yKeyboardMonitor();
++
++    struct KeyStroke
++    {
++        quint32 keysym;
++        quint32 modifiers;
++    };
++
++    Q_SCRIPTABLE void GrabKeyboard();
++
++    Q_SCRIPTABLE void UngrabKeyboard();
++
++    Q_SCRIPTABLE void WatchKeyboard();
++
++    Q_SCRIPTABLE void UnwatchKeyboard();
++
++    Q_SCRIPTABLE void SetKeyGrabs(const QList<quint32> &modifiers, const QList<KeyStroke> &keystrokes);
++
++Q_SIGNALS:
++    Q_SCRIPTABLE void KeyEvent(bool released, quint32 state, quint32 keysym, quint32 unichar, quint16 keycode);
++
++public:
++    bool processKey(uint32_t key, KeyboardKeyState state, std::chrono::microseconds time);
++
++private:
++    bool checkPermission();
++    void emitKeyEvent(const QString &name, bool released, quint32 state, quint32 keysym, quint32 unichar, quint16 keycode);
++
++    struct GrabData
++    {
++        bool watched;
++        bool grabbed;
++        QList<quint32> modifiers;
++        QList<KeyStroke> keys;
++        quint32 lastModifier;
++        std::chrono::microseconds lastModifierTime;
++        bool modifierWasForwarded = false;
++    };
++
++    QHash<QString, GrabData> m_clients;
++    QDBusServiceWatcher m_dbusWatcher;
++};
++
++const QDBusArgument &operator>>(const QDBusArgument &arg, A11yKeyboardMonitor::KeyStroke &keystroke);
++const QDBusArgument &operator<<(QDBusArgument &arg, const A11yKeyboardMonitor::KeyStroke &keystroke);
++
++}
+diff --git a/src/keyboard_input.cpp b/src/keyboard_input.cpp
+index 083d3fdc55c..97d00a6a860 100644
+--- a/src/keyboard_input.cpp
++++ b/src/keyboard_input.cpp
+@@ -273,6 +273,11 @@ void KeyboardInputRedirection::processKey(uint32_t key, KeyboardKeyState state,
+         return;
+     }
+ 
++    const bool ret = m_a11yKeyboardMonitor.processKey(key, state, time);
++    if (ret) {
++        return;
++    }
++
+     if (state == KeyboardKeyState::Pressed) {
+         if (!m_pressedKeys.contains(key)) {
+             m_pressedKeys.append(key);
+diff --git a/src/keyboard_input.h b/src/keyboard_input.h
+index 9955e6c1d4b..e4986876805 100644
+--- a/src/keyboard_input.h
++++ b/src/keyboard_input.h
+@@ -8,6 +8,7 @@
+ */
+ #pragma once
+ 
++#include "a11ykeyboardmonitor.h"
+ #include "input.h"
+ 
+ #include <QObject>
+@@ -85,6 +86,7 @@ private:
+     KeyboardLayout *m_keyboardLayout = nullptr;
+     QList<uint32_t> m_pressedKeys;
+     QList<uint32_t> m_filteredKeys;
++    A11yKeyboardMonitor m_a11yKeyboardMonitor;
+ };
+ 
+ }
+diff --git a/src/org.freedesktop.a11y.xml b/src/org.freedesktop.a11y.xml
+new file mode 100644
+index 00000000000..4f1d210423f
+--- /dev/null
++++ b/src/org.freedesktop.a11y.xml
+@@ -0,0 +1,119 @@
++<!DOCTYPE node PUBLIC
++'-//freedesktop//DTD D-BUS Object Introspection 1.0//EN'
++'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>
++<node>
++  <!--
++      org.freedesktop.a11y.KeyboardMonitor:
++      @short_description: interface for monitoring of keyboard input by assistive technologies
++
++      This interface is used by assistive technologies to monitor keyboard
++      input of the compositor. The compositor is expected to listen on
++      the well-known bus name "org.freedesktop.a11y.Manager" at the object
++      path "/org/freedesktop/a11y/Manager".
++  -->
++  <interface name="org.freedesktop.a11y.KeyboardMonitor">
++    <!--
++        GrabKeyboard:
++
++        Starts grabbing all key events. The client receives the events
++        through the KeyEvent signal, and in addition, the events aren't handled
++        normally by the compositor. This includes changes to the state
++        of toggles like Caps Lock, Num Lock, and Scroll Lock.
++
++        This behavior stays in effect until the same client calls
++        UngrabKeyboard or closes its D-Bus connection.
++    -->
++    <method name="GrabKeyboard" />
++
++    <!--
++        UngrabKeyboard:
++
++        Reverses the effect of calling GrabKeyboard. If GrabKeyboard wasn't
++        previously called, this method does nothing.
++
++        After calling this method, the key grabs specified in the last call
++        to SetKeyGrabs, if any, are still in effect.
++        Also, the client will still receive key events through the KeyEvent
++        signal, if it has called WatchKeyboard.
++    -->
++    <method name="UngrabKeyboard" />
++
++    <!--
++        WatchKeyboard:
++
++        Starts watching all key events. The client receives the events
++        through the KeyEvent signal, but the events are still handled
++        normally by the compositor. This includes changes to the state
++        of toggles like Caps Lock, Num Lock, and Scroll Lock.
++
++        This behavior stays in effect until the same client calls
++        UnwatchKeyboard or closes its D-Bus connection.
++    -->
++    <method name="WatchKeyboard" />
++
++    <!--
++        UnwatchKeyboard:
++
++        Reverses the effect of calling WatchKeyboard. If WatchKeyboard wasn't
++        previously called, this method does nothing.
++
++        After calling this method, the key grabs specified in the last call
++        to SetKeyGrabs, if any, are still in effect,
++        but other key events are no longer reported to this client.
++    -->
++    <method name="UnwatchKeyboard" />
++
++    <!--
++        SetKeyGrabs:
++        @modifiers: set of custom modifiers to grab
++        @keystrokes: set of keystrokes without custom modifiers to grab
++
++        Sets the current key grabs for the calling client, overriding
++        any previous call to this method. For grabbed key events, the
++        KeyEvent signal is emitted, and normal key event handling
++        is suppressed, including state changes for toggles like Caps Lock
++        and Num Lock.
++
++        The grabs set by this method stay in effect until the same client
++        calls this method again, or until that client closes its D-Bus
++        connection.
++
++        Each item in @modifiers is an XKB keysym. All keys in this list
++        will be grabbed, and keys pressed while any of these keys are down
++        will also be grabbed.
++
++        Each item in @keystrokes is a struct with the following fields:
++
++        - the XKB keysym of the non-modifier key
++        - the XKB modifier mask of the modifiers, if any, for this keystroke
++
++        If any of the keys in @modifiers is pressed alone, the compositor
++        is required to ignore the key press and release event if a second
++        key press of the same modifier is not received within a reasonable
++        time frame, for example, the key repeat delay.
++        If such event is received, this second event is processed normally.
++    -->
++    <method name="SetKeyGrabs">
++      <arg type="au" name="modifiers" direction="in" />
++      <arg type="a(uu)" name="keystrokes" direction="in" />
++    </method>
++
++    <!--
++        KeyEvent:
++        @released: whether this is a key-up event
++        @state: XKB modifier mask for currently pressed modifiers
++        @keysym: XKB keysym for this key
++        @unichar: Unicode character for this key, or 0 if none
++        @keycode: hardware-dependent keycode for this key
++
++        The compositor emits this signal for each key press or release.
++    -->
++    <signal name="KeyEvent">
++      <arg type="b" name="released" direction="in" />
++      <arg type="u" name="state" direction="in" />
++      <arg type="u" name="keysym" direction="in" />
++      <arg type="u" name="unichar" direction="in" />
++      <arg type="q" name="keycode" direction="in" />
++    </signal>
++  </interface>
++</node>
+-- 
+GitLab
+

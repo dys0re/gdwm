@@ -2128,21 +2128,9 @@ bool Window::performMousePressCommand(Options::MouseCommand cmd, const QPointF &
         break;
     case Options::MouseActivateAndRaise: {
         replay = isActive(); // for clickraise mode
-        bool mustReplay = !rules()->checkAcceptFocus(acceptsFocus());
-        if (mustReplay) {
-            auto it = workspace()->stackingOrder().constEnd(),
-                 begin = workspace()->stackingOrder().constBegin();
-            while (mustReplay && --it != begin && *it != this) {
-                auto c = *it;
-                if (!c->isClient() || (c->keepAbove() && !keepAbove()) || (keepBelow() && !c->keepBelow())) {
-                    continue; // can never raise above "it"
-                }
-                mustReplay = !(c->isOnCurrentDesktop() && c->isOnCurrentActivity() && c->frameGeometry().intersects(frameGeometry()));
-            }
-        }
         workspace()->takeActivity(this, Workspace::ActivityFocus | Workspace::ActivityRaise);
         workspace()->setActiveOutput(globalPos);
-        replay = replay || mustReplay;
+        replay = replay || !rules()->checkAcceptFocus(acceptsFocus());
         break;
     }
     case Options::MouseActivateAndLower:

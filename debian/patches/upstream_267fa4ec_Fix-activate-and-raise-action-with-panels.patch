@@ -1,0 +1,68 @@
+From 267fa4ece648dd1a5b4c65f8af34a84f20f428f3 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Fri, 11 Jul 2025 09:39:37 +0000
+Subject: [PATCH] Fix "activate and raise" action with panels
+
+With the "activate and raise" action, the window manager should activate
+and raise the window but not pass the click.
+
+If a window is focusable, then only the mouse press should be filtered
+out.
+
+If a window is not focusable, there is some sophisticated code to see
+whether the window is obstructed by any other window (because isActive()
+is always false for such windows so we need another way to determine
+whether it's the first click). If the window is obstructed, then no click
+will be passed but the action will still be performed, in other words,
+the window will be activated (noop) and raised. However, this breaks if
+a window has transients, which is the case with panels. We want the click
+to be passed along even though the window is covered by a child (it
+doesn't matter whether it accepts focus).
+
+Given that primarily only special surfaces don't accept focus, e.g.
+panels, and they are expected to receive clicks, the special stacking
+order code path can be replaced with a `return false;` statement. Which
+is also identical to the MouseActivate case.
+
+See also e8dad997fae98e3c0c40653667dd22a002747556
+
+BUG: 461414
+
+
+(cherry picked from commit f73200def99d7511955c3c698b53832cd3bb9404)
+
+Co-authored-by: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+---
+ src/window.cpp | 21 +--------------------
+ 1 file changed, 1 insertion(+), 20 deletions(-)
+
+diff --git a/src/window.cpp b/src/window.cpp
+index e535ee3c40f..d70e9bccfe9 100644
+--- a/src/window.cpp
++++ b/src/window.cpp
+@@ -2128,21 +2128,9 @@ bool Window::mousePressCommandConsumesEvent(Options::MouseCommand command) const
+         break;
+     case Options::MouseActivateAndRaise: {
+         replay = isActive(); // for clickraise mode
+-        bool mustReplay = !rules()->checkAcceptFocus(acceptsFocus());
+-        if (mustReplay) {
+-            auto it = workspace()->stackingOrder().constEnd(),
+-                 begin = workspace()->stackingOrder().constBegin();
+-            while (mustReplay && --it != begin && *it != this) {
+-                auto c = *it;
+-                if (!c->isClient() || (c->keepAbove() && !keepAbove()) || (keepBelow() && !c->keepBelow())) {
+-                    continue; // can never raise above "it"
+-                }
+-                mustReplay = !(c->isOnCurrentDesktop() && c->isOnCurrentActivity() && c->frameGeometry().intersects(frameGeometry()));
+-            }
+-        }
+         workspace()->takeActivity(this, Workspace::ActivityFocus | Workspace::ActivityRaise);
+         workspace()->setActiveOutput(globalPos);
+-        replay = replay || mustReplay;
++        replay = replay || !rules()->checkAcceptFocus(acceptsFocus());
+         break;
+     }
+     case Options::MouseActivateAndLower:
+ -- 
+GitLab
+

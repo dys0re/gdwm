@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -e
+
+if [ "$1" = configure ]; then
+    # Set the capabilities
+    if command -v setcap > /dev/null ; then
+        cap="CAP_SYS_NICE=+ep"
+        binary=/usr/bin/kwin_wayland
+        if ! setcap -v "${cap}" "${binary}" > /dev/null; then
+            setcap "${cap}" "${binary}" \
+                && echo "Successfully set ${cap} for ${binary}" \
+                || echo "Failed to set ${cap} for ${binary}" >&2
+        fi
+    else
+        echo "setcap command not found, failed to set capabilities for kwin_wayland" >&2
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0
+

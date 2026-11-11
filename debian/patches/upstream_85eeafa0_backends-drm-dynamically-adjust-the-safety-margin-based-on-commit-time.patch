@@ -1,0 +1,104 @@
+From 85eeafa09282cd6bda8effb0523ee656cb0eab2f Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Thu, 3 Apr 2025 18:46:07 +0200
+Subject: [PATCH] backends/drm: dynamically adjust the safety margin based on
+ commit time
+
+Atomic (test) commits can take a varying amount of time, and that depends on
+the content of the commits as well as CPU frequency. For example, changing
+GAMMA_LUT can take a whole additional millisecond on my desktop PC, and may
+take even longer on laptops in power saving mode.
+
+To mitigate that, as well as the scheduler not necessarily waking up the commit
+thread at the desired time, the added logic compares the desired vs. achieved
+commit completion timestamp after every atomic commit, and adjusts the safety
+margin accordingly.
+
+As we currently don't know exactly when the atomic commit is actually applied,
+and the timestamp for when the ioctl returns is just an approximation (which
+fails on NVidia), this keeps the base safety margin at 1.5ms. We can reduce
+that once we have some API to actually know when the commit is applied.
+
+BUG: 495167
+---
+ src/backends/drm/drm_commit_thread.cpp | 27 ++++++++++++++++++++++++--
+ src/backends/drm/drm_commit_thread.h   |  2 ++
+ src/backends/drm/drm_pipeline.cpp      |  2 ++
+ 3 files changed, 29 insertions(+), 2 deletions(-)
+
+--- a/src/backends/drm/drm_commit_thread.cpp
++++ b/src/backends/drm/drm_commit_thread.cpp
+@@ -143,11 +143,31 @@ void DrmCommitThread::submit()
+     const auto vrr = commit->isVrr();
+     const bool success = commit->commit();
+     if (success) {
+-        m_lastCommitTime = std::chrono::steady_clock::now();
+         m_vrr = vrr.value_or(m_vrr);
+         m_tearing = commit->isTearing();
+         m_committed = std::move(m_commits.front());
+         m_commits.erase(m_commits.begin());
++
++        // the kernel might still take some time to actually apply the commit
++        // after we return from the commit ioctl, but we don't have any better
++        // way to know when it's done
++        m_lastCommitTime = std::chrono::steady_clock::now();
++        // this is when we wanted to have completed the commit
++        const auto targetTimestamp = m_targetPageflipTime - m_baseSafetyMargin;
++        // this is how much safety we need to add or remove to achieve that next time
++        const auto safetyDifference = targetTimestamp - m_lastCommitTime;
++        if (safetyDifference < std::chrono::nanoseconds::zero()) {
++            // the commit was done later than desired, immediately add the
++            // required difference to make sure that it doesn't happen again
++            m_additionalSafetyMargin -= safetyDifference;
++        } else {
++            // we were done earlier than desired. This isn't problematic, but
++            // we want to keep latency at a minimum, so slowly reduce the safety margin
++            m_additionalSafetyMargin -= safetyDifference / 10;
++        }
++        const auto maximumReasonableMargin = std::min<std::chrono::nanoseconds>(3ms, m_minVblankInterval / 2);
++        m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
++        m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
+     } else {
+         if (m_commits.size() > 1) {
+             // the failure may have been because of the reordering of commits
+@@ -338,6 +358,8 @@ void DrmCommitThread::clearDroppedCommit
+     m_commitsToDelete.clear();
+ }
+ 
++// TODO reduce the default for this, once we have a more accurate way to know when an atomic commit
++// is actually applied. Waiting for the commit returning seems to work on Intel and AMD, but not with NVidia
+ static const std::chrono::microseconds s_safetyMarginMinimum = []() {
+     bool ok = false;
+     int value = qEnvironmentVariableIntValue("KWIN_DRM_OVERRIDE_SAFETY_MARGIN", &ok);
+@@ -354,7 +376,8 @@ void DrmCommitThread::setModeInfo(uint32
+     m_minVblankInterval = std::chrono::nanoseconds(1'000'000'000'000ull / maximum);
+     // the kernel rejects commits that happen during vblank
+     // the 1.5ms on top of that was chosen experimentally, for the time it takes to commit + scheduling inaccuracies
+-    m_safetyMargin = vblankTime + s_safetyMarginMinimum;
++    m_baseSafetyMargin = vblankTime + s_safetyMarginMinimum;
++    m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
+ }
+ 
+ void DrmCommitThread::pageFlipped(std::chrono::nanoseconds timestamp)
+--- a/src/backends/drm/drm_commit_thread.h
++++ b/src/backends/drm/drm_commit_thread.h
+@@ -65,6 +65,8 @@ private:
+     bool m_vrr = false;
+     bool m_tearing = false;
+     std::chrono::nanoseconds m_safetyMargin{0};
++    std::chrono::nanoseconds m_baseSafetyMargin{0};
++    std::chrono::nanoseconds m_additionalSafetyMargin = std::chrono::milliseconds(1);
+     bool m_ping = false;
+     bool m_pageflipTimeoutDetected = false;
+ };
+--- a/src/backends/drm/drm_pipeline.cpp
++++ b/src/backends/drm/drm_pipeline.cpp
+@@ -444,6 +444,8 @@ void DrmPipeline::pageFlipped(std::chron
+ {
+     RenderLoopPrivate::get(m_output->renderLoop())->notifyVblank(timestamp);
+     m_commitThread->pageFlipped(timestamp);
++    // the commit thread adjusts the safety margin on every commit
++    m_output->renderLoop()->setPresentationSafetyMargin(m_commitThread->safetyMargin());
+     if (gpu()->needsModeset()) {
+         gpu()->maybeModeset(nullptr, nullptr);
+     }

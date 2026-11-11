@@ -1,0 +1,667 @@
+From 7b93a7761e1d3fe1ca9af863c3921a7a3a276530 Mon Sep 17 00:00:00 2001
+From: Nicolas Fella <nicolas.fella@gmx.de>
+Date: Mon, 26 Dec 2022 00:34:42 +0100
+Subject: [PATCH] Implement MouseKeys on Wayland
+
+This allows to move the mouse cursor using numpad keys.
+
+This is an accessibility feature. On X11 this is implemented in XKB, on Wayland we get to do it outself.
+
+It's implemented as a plugin that filters for relevant keys and generates mouse events through a virtual pointer device
+
+BUG: 478620
+---
+ autotests/integration/CMakeLists.txt      |   1 +
+ autotests/integration/mouse_keys_test.cpp | 222 +++++++++++++++++++
+ src/input.h                               |   1 +
+ src/plugins/CMakeLists.txt                |   1 +
+ src/plugins/mousekeys/CMakeLists.txt      |  18 ++
+ src/plugins/mousekeys/main.cpp            |  25 +++
+ src/plugins/mousekeys/metadata.json       |   5 +
+ src/plugins/mousekeys/mousekeys.cpp       | 249 ++++++++++++++++++++++
+ src/plugins/mousekeys/mousekeys.h         |  70 ++++++
+ 9 files changed, 592 insertions(+)
+ create mode 100644 autotests/integration/mouse_keys_test.cpp
+ create mode 100644 src/plugins/mousekeys/CMakeLists.txt
+ create mode 100644 src/plugins/mousekeys/main.cpp
+ create mode 100644 src/plugins/mousekeys/metadata.json
+ create mode 100644 src/plugins/mousekeys/mousekeys.cpp
+ create mode 100644 src/plugins/mousekeys/mousekeys.h
+
+--- a/autotests/integration/CMakeLists.txt
++++ b/autotests/integration/CMakeLists.txt
+@@ -145,6 +145,7 @@ integrationTest(NAME testWorkspace SRCS
+ integrationTest(NAME testMouseActions SRCS mouseactions_test.cpp LIBS)
+ integrationTest(NAME testColorManagement SRCS test_colormanagement.cpp)
+ integrationTest(NAME testKeyboardInput SRCS keyboard_input_test.cpp)
++integrationTest(NAME testMouseKeys SRCS mouse_keys_test.cpp)
+ 
+ if(KWIN_BUILD_X11)
+     integrationTest(NAME testDontCrashEmptyDeco SRCS dont_crash_empty_deco.cpp LIBS KDecoration3::KDecoration)
+--- /dev/null
++++ b/autotests/integration/mouse_keys_test.cpp
+@@ -0,0 +1,222 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-FileCopyrightText: 2024 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "kwin_wayland_test.h"
++
++#include "keyboard_input.h"
++#include "pointer_input.h"
++#include "wayland_server.h"
++#include "window.h"
++#include "workspace.h"
++
++#include <KWayland/Client/pointer.h>
++#include <KWayland/Client/seat.h>
++
++#include <linux/input.h>
++
++namespace KWin
++{
++
++static const QString s_socketName = QStringLiteral("wayland_test_kwin_mouse_keys-0");
++
++class MouseKeysTest : public QObject
++{
++    Q_OBJECT
++private Q_SLOTS:
++    void initTestCase();
++    void init();
++    void cleanup();
++    void testMove();
++    void testClick();
++};
++
++void MouseKeysTest::initTestCase()
++{
++    KConfig kaccessConfig("kaccessrc");
++    kaccessConfig.group(QStringLiteral("Mouse")).writeEntry("MouseKeys", true);
++    kaccessConfig.sync();
++
++    qRegisterMetaType<KWin::Window *>();
++    QVERIFY(waylandServer()->init(s_socketName));
++
++    qputenv("XKB_DEFAULT_RULES", "evdev");
++
++    kwinApp()->start();
++
++    Test::setOutputConfig({
++        QRect(0, 0, 1280, 1024),
++        QRect(1280, 0, 1280, 1024),
++    });
++}
++
++void MouseKeysTest::init()
++{
++    QVERIFY(Test::setupWaylandConnection(Test::AdditionalWaylandInterface::Seat));
++    QVERIFY(Test::waitForWaylandPointer());
++
++    workspace()->setActiveOutput(QPoint(500, 500));
++    input()->pointer()->warp(QPoint(500, 500));
++}
++
++void MouseKeysTest::cleanup()
++{
++    Test::destroyWaylandConnection();
++}
++
++void MouseKeysTest::testMove()
++{
++    std::unique_ptr<KWayland::Client::Pointer> pointer(Test::waylandSeat()->createPointer());
++
++    std::unique_ptr<KWayland::Client::Surface> surface(Test::createSurface());
++    QVERIFY(surface != nullptr);
++    std::unique_ptr<Test::XdgToplevel> shellSurface(Test::createXdgToplevelSurface(surface.get()));
++    QVERIFY(shellSurface != nullptr);
++    Window *waylandWindow = Test::renderAndWaitForShown(surface.get(), QSize(1000, 1000), Qt::blue);
++    QVERIFY(waylandWindow);
++
++    QSignalSpy pointerSpy(pointer.get(), &KWayland::Client::Pointer::motion);
++
++    quint32 timestamp = 0;
++
++    // left
++    Test::keyboardKeyPressed(KEY_KP4, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP4, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(495, 500));
++    pointerSpy.clear();
++
++    // left up
++    Test::keyboardKeyPressed(KEY_KP7, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP7, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(490, 495));
++    pointerSpy.clear();
++
++    // up
++    Test::keyboardKeyPressed(KEY_KP8, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP8, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(490, 490));
++    pointerSpy.clear();
++
++    // right up
++    Test::keyboardKeyPressed(KEY_KP9, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP9, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(495, 485));
++    pointerSpy.clear();
++
++    // right
++    Test::keyboardKeyPressed(KEY_KP6, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP6, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(500, 485));
++    pointerSpy.clear();
++
++    // right down
++    Test::keyboardKeyPressed(KEY_KP3, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP3, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(505, 490));
++    pointerSpy.clear();
++
++    // down
++    Test::keyboardKeyPressed(KEY_KP2, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP2, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(505, 495));
++    pointerSpy.clear();
++
++    // left down
++    Test::keyboardKeyPressed(KEY_KP1, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KP1, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first().first().toPointF(), QPointF(500, 500));
++    pointerSpy.clear();
++}
++
++void MouseKeysTest::testClick()
++{
++    std::unique_ptr<KWayland::Client::Pointer> pointer(Test::waylandSeat()->createPointer());
++
++    std::unique_ptr<KWayland::Client::Surface> surface(Test::createSurface());
++    QVERIFY(surface != nullptr);
++    std::unique_ptr<Test::XdgToplevel> shellSurface(Test::createXdgToplevelSurface(surface.get()));
++    QVERIFY(shellSurface != nullptr);
++    Window *waylandWindow = Test::renderAndWaitForShown(surface.get(), QSize(1000, 1000), Qt::blue);
++    QVERIFY(waylandWindow);
++
++    QSignalSpy pointerSpy(pointer.get(), &KWayland::Client::Pointer::buttonStateChanged);
++
++    quint32 timestamp = 0;
++
++    // left mouse button is default
++    Test::keyboardKeyPressed(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_LEFT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Pressed);
++    pointerSpy.clear();
++
++    Test::keyboardKeyReleased(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_LEFT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Released);
++    pointerSpy.clear();
++
++    // switch to middle
++    Test::keyboardKeyPressed(KEY_KPASTERISK, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KPASTERISK, ++timestamp);
++
++    Test::keyboardKeyPressed(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_MIDDLE);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Pressed);
++    pointerSpy.clear();
++
++    Test::keyboardKeyReleased(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_MIDDLE);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Released);
++    pointerSpy.clear();
++
++    // switch to right
++    Test::keyboardKeyPressed(KEY_KPMINUS, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KPMINUS, ++timestamp);
++
++    Test::keyboardKeyPressed(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_RIGHT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Pressed);
++    pointerSpy.clear();
++
++    Test::keyboardKeyReleased(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_RIGHT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Released);
++    pointerSpy.clear();
++
++    // and back to left
++    Test::keyboardKeyPressed(KEY_KPSLASH, ++timestamp);
++    Test::keyboardKeyReleased(KEY_KPSLASH, ++timestamp);
++
++    Test::keyboardKeyPressed(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_LEFT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Pressed);
++    pointerSpy.clear();
++
++    Test::keyboardKeyReleased(KEY_KP5, ++timestamp);
++    QVERIFY(pointerSpy.wait());
++    QCOMPARE(pointerSpy.first()[2], BTN_LEFT);
++    QCOMPARE(pointerSpy.first()[3], (int)KWayland::Client::Pointer::ButtonState::Released);
++    pointerSpy.clear();
++}
++}
++
++WAYLANDTEST_MAIN(KWin::MouseKeysTest)
++#include "mouse_keys_test.moc"
+--- a/src/input.h
++++ b/src/input.h
+@@ -326,6 +326,7 @@ enum Order {
+     ButtonRebind,
+     BounceKeys,
+     StickyKeys,
++    MouseKeys,
+     EisInput,
+ 
+     VirtualTerminal,
+--- a/src/plugins/CMakeLists.txt
++++ b/src/plugins/CMakeLists.txt
+@@ -79,6 +79,7 @@ add_subdirectory(magnifier)
+ add_subdirectory(maximize)
+ add_subdirectory(minimizeall)
+ add_subdirectory(mouseclick)
++add_subdirectory(mousekeys)
+ add_subdirectory(mousemark)
+ add_subdirectory(nightlight)
+ add_subdirectory(outputlocator)
+--- /dev/null
++++ b/src/plugins/mousekeys/CMakeLists.txt
+@@ -0,0 +1,18 @@
++# SPDX-FileCopyrightText: 2022 Nicolas Fella <nicolas.fella@gmx.de>
++# SPDX-License-Identifier: BSD-3-Clause
++
++kcoreaddons_add_plugin(MouseKeysPlugin INSTALL_NAMESPACE "kwin/plugins")
++
++ecm_qt_declare_logging_category(MouseKeysPlugin
++    HEADER mousekeys_debug.h
++    IDENTIFIER KWIN_MOUSEKEYS
++    CATEGORY_NAME kwin_mousekeys
++    DEFAULT_SEVERITY Warning
++)
++
++target_sources(MouseKeysPlugin PRIVATE
++    main.cpp
++    mousekeys.cpp
++)
++target_link_libraries(MouseKeysPlugin PRIVATE kwin)
++
+--- /dev/null
++++ b/src/plugins/mousekeys/main.cpp
+@@ -0,0 +1,25 @@
++/*
++    SPDX-FileCopyrightText: 2022 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include <main.h>
++#include <plugin.h>
++
++#include "mousekeys.h"
++
++class KWIN_EXPORT MouseKeysFactory : public KWin::PluginFactory
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID PluginFactory_iid FILE "metadata.json")
++    Q_INTERFACES(KWin::PluginFactory)
++
++public:
++    std::unique_ptr<KWin::Plugin> create() const override
++    {
++        return std::make_unique<MouseKeysFilter>();
++    }
++};
++
++#include "main.moc"
+--- /dev/null
++++ b/src/plugins/mousekeys/metadata.json
+@@ -0,0 +1,5 @@
++{
++    "KPlugin": {
++        "EnabledByDefault": true
++    }
++}
+--- /dev/null
++++ b/src/plugins/mousekeys/mousekeys.cpp
+@@ -0,0 +1,249 @@
++/*
++    SPDX-FileCopyrightText: 2022 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#include "mousekeys.h"
++#include "mousekeys_debug.h"
++
++#include <cmath>
++
++QString MouseKeysInputDevice::name() const
++{
++    return QStringLiteral("Mouse keys device");
++}
++
++void MouseKeysInputDevice::setEnabled(bool enabled)
++{
++}
++
++bool MouseKeysInputDevice::isEnabled() const
++{
++    return true;
++}
++
++bool MouseKeysInputDevice::isKeyboard() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isLidSwitch() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isPointer() const
++{
++    return true;
++}
++
++bool MouseKeysInputDevice::isTabletModeSwitch() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isTabletPad() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isTabletTool() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isTouch() const
++{
++    return false;
++}
++
++bool MouseKeysInputDevice::isTouchpad() const
++{
++    return false;
++}
++
++MouseKeysFilter::MouseKeysFilter()
++    : KWin::Plugin()
++    , KWin::InputEventFilter(KWin::InputFilterOrder::MouseKeys)
++    , m_configWatcher(KConfigWatcher::create(KSharedConfig::openConfig("kaccessrc")))
++{
++    const QLatin1String groupName("Mouse");
++    connect(m_configWatcher.get(), &KConfigWatcher::configChanged, this, [this, groupName](const KConfigGroup &group) {
++        if (group.name() == groupName) {
++            loadConfig(group);
++        }
++    });
++    loadConfig(m_configWatcher->config()->group(groupName));
++
++    m_delayTimer.setSingleShot(true);
++    connect(&m_delayTimer, &QTimer::timeout, this, &MouseKeysFilter::delayTriggered);
++    connect(&m_repeatTimer, &QTimer::timeout, this, &MouseKeysFilter::repeatTriggered);
++}
++
++void MouseKeysFilter::loadConfig(const KConfigGroup &group)
++{
++    const bool newEnabled = group.readEntry<bool>("MouseKeys", false);
++
++    if (m_enabled && !newEnabled) {
++        KWin::input()->uninstallInputEventFilter(this);
++        KWin::input()->removeInputDevice(m_inputDevice.get());
++        m_inputDevice = nullptr;
++        m_delayTimer.stop();
++        m_repeatTimer.stop();
++    }
++
++    if (!m_enabled && newEnabled) {
++        m_inputDevice = std::make_unique<MouseKeysInputDevice>();
++        KWin::input()->addInputDevice(m_inputDevice.get());
++        KWin::input()->installInputEventFilter(this);
++    }
++
++    m_enabled = newEnabled;
++    m_stepsToMax = group.readEntry<int>("MKTimeToMax", 30);
++    m_curve = group.readEntry<int>("MKCurve", 0);
++    m_maxSpeed = group.readEntry<int>("MKMaxSpeed", 30);
++    m_delay = group.readEntry<int>("MKDelay", 160);
++    m_interval = group.readEntry<int>("MKInterval", 40);
++
++    if (m_enabled) {
++        m_delayTimer.setInterval(m_delay);
++        m_repeatTimer.setInterval(m_interval);
++
++        m_keyStates[KEY_KP1] = false;
++        m_keyStates[KEY_KP2] = false;
++        m_keyStates[KEY_KP3] = false;
++        m_keyStates[KEY_KP4] = false;
++        m_keyStates[KEY_KP6] = false;
++        m_keyStates[KEY_KP7] = false;
++        m_keyStates[KEY_KP8] = false;
++        m_keyStates[KEY_KP9] = false;
++        m_mouseButton = BTN_LEFT;
++        m_currentKey = 0;
++        m_currentStep = 0;
++    }
++}
++
++static QPointF deltaForKey(int key)
++{
++    static constexpr int delta = 5;
++
++    switch (key) {
++    case KEY_KP1:
++        return {-delta, delta};
++    case KEY_KP2:
++        return {0, delta};
++    case KEY_KP3:
++        return {delta, delta};
++    case KEY_KP4:
++        return {-delta, 0};
++    case KEY_KP6:
++        return {delta, 0};
++    case KEY_KP7:
++        return {-delta, -delta};
++    case KEY_KP8:
++        return {0, -delta};
++    case KEY_KP9:
++        return {delta, -delta};
++    }
++
++    return {0, 0};
++}
++
++void MouseKeysFilter::delayTriggered()
++{
++    m_repeatTimer.start();
++    movePointer(deltaForKey(m_currentKey));
++}
++
++double MouseKeysFilter::deltaFactorForStep(int step) const
++{
++    // The algorithm to compute the delta is described in the XKB library
++    // specification (http://www.xfree86.org/current/XKBlib.pdf), section 10.5
++
++    if (step > m_stepsToMax) {
++        return m_maxSpeed;
++    }
++
++    const double curveFactor = 1 + ((double)m_curve / 1000);
++
++    return (m_maxSpeed / std::pow(m_stepsToMax, curveFactor)) * std::pow(step, curveFactor);
++}
++
++void MouseKeysFilter::repeatTriggered()
++{
++    ++m_currentStep;
++
++    movePointer(deltaForKey(m_currentKey) * deltaFactorForStep(m_currentStep));
++}
++
++void MouseKeysFilter::movePointer(QPointF delta)
++{
++    const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch());
++    Q_EMIT m_inputDevice->pointerMotion(delta, delta, time, m_inputDevice.get());
++    Q_EMIT m_inputDevice->pointerFrame(m_inputDevice.get());
++}
++
++bool MouseKeysFilter::keyboardKey(KWin::KeyboardKeyEvent *event)
++{
++    if (!m_enabled) {
++        return false;
++    }
++
++    if (event->nativeScanCode == KEY_KP1
++        || event->nativeScanCode == KEY_KP2
++        || event->nativeScanCode == KEY_KP3
++        || event->nativeScanCode == KEY_KP4
++        || event->nativeScanCode == KEY_KP6
++        || event->nativeScanCode == KEY_KP7
++        || event->nativeScanCode == KEY_KP8
++        || event->nativeScanCode == KEY_KP9) {
++
++        if (!m_keyStates[event->nativeScanCode] && event->state == KWin::KeyboardKeyState::Pressed && m_currentKey == 0) {
++            m_keyStates[event->nativeScanCode] = true;
++            m_delayTimer.start();
++            m_currentKey = event->nativeScanCode;
++
++            movePointer(deltaForKey(event->nativeScanCode));
++
++        } else if (m_keyStates[event->nativeScanCode] && event->state == KWin::KeyboardKeyState::Released && event->nativeScanCode == m_currentKey) {
++            m_keyStates[event->nativeScanCode] = false;
++            m_delayTimer.stop();
++            m_repeatTimer.stop();
++            m_currentKey = 0;
++            m_currentStep = 0;
++        }
++
++        return true;
++    }
++
++    if (event->nativeScanCode == KEY_KP5) {
++        const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch());
++        if (event->state == KWin::KeyboardKeyState::Pressed) {
++            Q_EMIT m_inputDevice->pointerButtonChanged(m_mouseButton, KWin::PointerButtonState::Pressed, time, m_inputDevice.get());
++        } else {
++            Q_EMIT m_inputDevice->pointerButtonChanged(m_mouseButton, KWin::PointerButtonState::Released, time, m_inputDevice.get());
++        }
++
++        Q_EMIT m_inputDevice->pointerFrame(m_inputDevice.get());
++
++        return true;
++    }
++
++    if (event->nativeScanCode == KEY_KPSLASH) {
++        m_mouseButton = BTN_LEFT;
++        return true;
++    }
++
++    if (event->nativeScanCode == KEY_KPASTERISK) {
++        m_mouseButton = BTN_MIDDLE;
++        return true;
++    }
++
++    if (event->nativeScanCode == KEY_KPMINUS) {
++        m_mouseButton = BTN_RIGHT;
++        return true;
++    }
++
++    return false;
++}
+--- /dev/null
++++ b/src/plugins/mousekeys/mousekeys.h
+@@ -0,0 +1,70 @@
++/*
++    SPDX-FileCopyrightText: 2022 Nicolas Fella <nicolas.fella@gmx.de>
++
++    SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++*/
++
++#pragma once
++
++#include "plugin.h"
++
++#include "core/inputdevice.h"
++#include "input.h"
++#include "input_event.h"
++
++#include <linux/input-event-codes.h>
++
++#include <QKeySequence>
++#include <QTimer>
++
++class MouseKeysInputDevice : public KWin::InputDevice
++{
++    Q_OBJECT
++
++public:
++    QString name() const override;
++
++    bool isEnabled() const override;
++    void setEnabled(bool enabled) override;
++
++    bool isKeyboard() const override;
++    bool isPointer() const override;
++    bool isTouchpad() const override;
++    bool isTouch() const override;
++    bool isTabletTool() const override;
++    bool isTabletPad() const override;
++    bool isTabletModeSwitch() const override;
++    bool isLidSwitch() const override;
++};
++
++class MouseKeysFilter : public KWin::Plugin, public KWin::InputEventFilter
++{
++    Q_OBJECT
++public:
++    explicit MouseKeysFilter();
++
++    bool keyboardKey(KWin::KeyboardKeyEvent *event) override;
++
++private:
++    void loadConfig(const KConfigGroup &group);
++    void delayTriggered();
++    void repeatTriggered();
++    void movePointer(QPointF delta);
++    double deltaFactorForStep(int step) const;
++
++    std::unique_ptr<MouseKeysInputDevice> m_inputDevice;
++    KConfigWatcher::Ptr m_configWatcher;
++    QMap<quint32, bool> m_keyStates;
++    QTimer m_delayTimer;
++    QTimer m_repeatTimer;
++    quint32 m_currentKey = 0;
++    int m_currentStep = 0;
++    int m_mouseButton = BTN_LEFT;
++
++    bool m_enabled = false;
++    int m_stepsToMax = 0;
++    int m_curve = 0;
++    int m_maxSpeed = 0;
++    int m_delay = 0;
++    int m_interval = 0;
++};

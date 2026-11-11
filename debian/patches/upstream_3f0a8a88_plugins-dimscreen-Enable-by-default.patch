@@ -1,0 +1,22 @@
+From 3f0a8a886239cf57c5a8d122c334739d150560b5 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Thu, 20 Mar 2025 12:18:14 +0200
+Subject: [PATCH] plugins/dimscreen: Enable by default
+
+It helps to attract user's attention to the system prompt. It seems like
+a good default.
+---
+ src/plugins/dimscreen/package/metadata.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/src/plugins/dimscreen/package/metadata.json
++++ b/src/plugins/dimscreen/package/metadata.json
+@@ -101,7 +101,7 @@
+         "Description[x-test]": "xxDarkens the entire screen when requesting root privilegesxx",
+         "Description[zh_CN]": "系统请求 root 权限时降低屏幕亮度",
+         "Description[zh_TW]": "請求 root 權限時將整個螢幕變暗",
+-        "EnabledByDefault": false,
++        "EnabledByDefault": true,
+         "Icon": "preferences-system-windows-effect-dimscreen",
+         "Id": "dimscreen",
+         "License": "GPL",

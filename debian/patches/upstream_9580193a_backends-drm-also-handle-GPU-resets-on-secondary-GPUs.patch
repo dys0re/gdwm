@@ -1,0 +1,107 @@
+From 9580193a086ad4eb38d0a2ebf167abe5a36780f6 Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Wed, 11 Jun 2025 14:12:10 +0200
+Subject: [PATCH] backends/drm: also handle GPU resets on secondary GPUs
+
+Just re-creates the swapchains and context.
+
+
+(cherry picked from commit 7268ced6517dccc2d11420b62668af31f26a58e8)
+
+Co-authored-by: Xaver Hugl <xaver.hugl@kde.org>
+---
+From: Aurélien COUDERC <coucouf@debian.org>
+Adapt patch to cope with changes caused by a88748a4d8246a089345769cba881dbb85d3efff
+---
+ src/backends/drm/drm_egl_backend.cpp       |  5 +++++
+ src/backends/drm/drm_egl_backend.h         |  1 +
+ src/backends/drm/drm_egl_layer_surface.cpp | 17 ++++++++++++++---
+ src/backends/drm/drm_egl_layer_surface.h   |  2 ++
+ 4 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/src/backends/drm/drm_egl_backend.cpp b/src/backends/drm/drm_egl_backend.cpp
+index 033555e9768..c96f34e229d 100644
+--- a/src/backends/drm/drm_egl_backend.cpp
++++ b/src/backends/drm/drm_egl_backend.cpp
+@@ -132,6 +132,11 @@ std::shared_ptr<EglContext> EglGbmBackend::contextForGpu(DrmGpu *gpu)
+     return ret;
+ }
+ 
++void EglGbmBackend::resetContextForGpu(DrmGpu *gpu)
++{
++    m_contexts.erase(gpu->eglDisplay());
++}
++
+ std::unique_ptr<SurfaceTexture> EglGbmBackend::createSurfaceTextureWayland(SurfacePixmap *pixmap)
+ {
+     return std::make_unique<BasicEGLSurfaceTextureWayland>(this, pixmap);
+diff --git a/src/backends/drm/drm_egl_backend.h b/src/backends/drm/drm_egl_backend.h
+index 49bfe715d98..3a6f94dfd9f 100644
+--- a/src/backends/drm/drm_egl_backend.h
++++ b/src/backends/drm/drm_egl_backend.h
+@@ -61,6 +61,7 @@ public:
+ 
+     EglDisplay *displayForGpu(DrmGpu *gpu);
+     std::shared_ptr<EglContext> contextForGpu(DrmGpu *gpu);
++    void resetContextForGpu(DrmGpu *gpu);
+ 
+ private:
+     bool initializeEgl();
+diff --git a/src/backends/drm/drm_egl_layer_surface.cpp b/src/backends/drm/drm_egl_layer_surface.cpp
+index bb9a98e5df0..71f92398b7a 100644
+--- a/src/backends/drm/drm_egl_layer_surface.cpp
++++ b/src/backends/drm/drm_egl_layer_surface.cpp
+@@ -408,7 +408,7 @@ bool EglGbmLayerSurface::checkSurface(const QSize &size, const QHash<uint32_t, Q
+ 
+ bool EglGbmLayerSurface::doesSurfaceFit(Surface *surface, const QSize &size, const QHash<uint32_t, QList<uint64_t>> &formats, Output::ColorPowerTradeoff tradeoff) const
+ {
+-    if (!surface || !surface->gbmSwapchain || surface->gbmSwapchain->size() != size) {
++    if (!surface || surface->needsRecreation || !surface->gbmSwapchain || surface->gbmSwapchain->size() != size) {
+         return false;
+     }
+     if (surface->tradeoff != tradeoff) {
+@@ -635,6 +635,19 @@ std::shared_ptr<DrmFramebuffer> EglGbmLayerSurface::importWithEgl(Surface *surfa
+     }
+ 
+     if (!surface->importContext->makeCurrent()) {
++        qCWarning(KWIN_DRM, "Failed to make import context current");
++        // this is probably caused by a GPU reset, let's not take any chances
++        surface->needsRecreation = true;
++        m_eglBackend->resetContextForGpu(m_gpu);
++        return nullptr;
++    }
++    const auto restoreContext = qScopeGuard([this]() {
++        m_eglBackend->makeCurrent();
++    });
++    if (surface->importContext->checkGraphicsResetStatus() != GL_NO_ERROR) {
++        qCWarning(KWIN_DRM, "Detected GPU reset on secondary GPU %s", qPrintable(m_gpu->drmDevice()->path()));
++        surface->needsRecreation = true;
++        m_eglBackend->resetContextForGpu(m_gpu);
+         return nullptr;
+     }
+     std::unique_ptr<GLRenderTimeQuery> renderTime;
+@@ -703,8 +716,6 @@ std::shared_ptr<DrmFramebuffer> EglGbmLayerSurface::importWithEgl(Surface *surfa
+         frame->addRenderTimeQuery(std::move(renderTime));
+     }
+ 
+-    // restore the old context
+-    m_eglBackend->makeCurrent();
+     return m_gpu->importBuffer(slot->buffer(), endFence.takeFileDescriptor());
+ }
+ 
+diff --git a/src/backends/drm/drm_egl_layer_surface.h b/src/backends/drm/drm_egl_layer_surface.h
+index 2d5d8806796..72643e6eec0 100644
+--- a/src/backends/drm/drm_egl_layer_surface.h
++++ b/src/backends/drm/drm_egl_layer_surface.h
+@@ -80,6 +80,8 @@ private:
+     {
+         ~Surface();
+ 
++        bool needsRecreation = false;
++
+         std::shared_ptr<EglContext> context;
+         std::shared_ptr<EglSwapchain> gbmSwapchain;
+         std::shared_ptr<EglSwapchainSlot> currentSlot;
+-- 
+GitLab
+

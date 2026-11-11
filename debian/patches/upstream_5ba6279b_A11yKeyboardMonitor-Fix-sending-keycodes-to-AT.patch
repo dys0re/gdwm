@@ -1,0 +1,62 @@
+From 5ba6279b1b2e16b38d0addf6241b770d0cd4adac Mon Sep 17 00:00:00 2001
+From: Nicolas Fella <nicolas.fella@gmx.de>
+Date: Tue, 1 Jul 2025 19:15:35 +0200
+Subject: [PATCH] A11yKeyboardMonitor: Fix sending keycodes to AT
+
+processKey receives scancodes, we need to convert to keycodes when emitting KeyEvent
+
+BUG: 506445
+---
+ src/a11ykeyboardmonitor.cpp | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/src/a11ykeyboardmonitor.cpp b/src/a11ykeyboardmonitor.cpp
+index 1bb839d798b..3b7e5fa357a 100644
+--- a/src/a11ykeyboardmonitor.cpp
++++ b/src/a11ykeyboardmonitor.cpp
+@@ -46,16 +46,17 @@ bool A11yKeyboardMonitor::processKey(uint32_t key, KeyboardKeyState state, std::
+     const auto text = input()->keyboard()->xkb()->toString(keysym);
+     const quint32 unicode = text.isEmpty() ? 0 : text.at(0).unicode();
+     const bool released = state == KeyboardKeyState::Released;
++    const auto keycode = key + 8;
+ 
+     for (auto [name, data] : m_clients.asKeyValueRange()) {
+         if (data.grabbed) {
+-            emitKeyEvent(name, released, mods, keysym, unicode, key);
++            emitKeyEvent(name, released, mods, keysym, unicode, keycode);
+         }
+ 
+         // if any of the grabbed modifiers is currently down, grab the key
+         for (const auto grabbedMod : data.modifiers) {
+             if (grabbedMod != keysym && data.pressedModifiers.contains(grabbedMod)) {
+-                emitKeyEvent(name, released, mods, keysym, unicode, key);
++                emitKeyEvent(name, released, mods, keysym, unicode, keycode);
+                 return true;
+             }
+         }
+@@ -83,19 +84,19 @@ bool A11yKeyboardMonitor::processKey(uint32_t key, KeyboardKeyState state, std::
+                 data.pressedModifiers.insert(keysym);
+             }
+ 
+-            emitKeyEvent(name, released, mods, keysym, unicode, key);
++            emitKeyEvent(name, released, mods, keysym, unicode, keycode);
+             return true;
+         }
+ 
+         for (const KeyStroke &stroke : std::as_const(data.keys)) {
+             if (mods == stroke.modifiers && stroke.keysym == keysym) {
+-                emitKeyEvent(name, released, mods, keysym, unicode, key);
++                emitKeyEvent(name, released, mods, keysym, unicode, keycode);
+                 return true;
+             }
+         }
+ 
+         if (data.watched) {
+-            emitKeyEvent(name, released, mods, keysym, unicode, key);
++            emitKeyEvent(name, released, mods, keysym, unicode, keycode);
+         }
+     }
+ 
+-- 
+GitLab
+

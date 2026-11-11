@@ -1,0 +1,59 @@
+From 225e73606c4bfcf0385d5c8664d2d086c930195a Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Fri, 4 Jul 2025 18:21:54 +0200
+Subject: [PATCH] wayland: Remove buffer checks in xdg_surface and
+ layer_surface factory requests
+
+Due to transactions getting delayed sometimes, the current surface state
+may have a buffer. It doesn't necessarily mean that it's a protocol error.
+
+Whether the client has actually committed an invalid state will be
+determined later when the client commits the surface after creating the
+surface role.
+
+BUG: 506412
+
+
+(cherry picked from commit 7772926af7f74e29c14f7b97418745111278dd83)
+
+Co-authored-by: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+---
+ src/wayland/layershell_v1.cpp | 5 -----
+ src/wayland/xdgshell.cpp      | 5 -----
+ 2 files changed, 10 deletions(-)
+
+diff --git a/src/wayland/layershell_v1.cpp b/src/wayland/layershell_v1.cpp
+index 1cb57ae2bcb..7ae52fa9fe1 100644
+--- a/src/wayland/layershell_v1.cpp
++++ b/src/wayland/layershell_v1.cpp
+@@ -111,11 +111,6 @@ void LayerShellV1InterfacePrivate::zwlr_layer_shell_v1_get_layer_surface(Resourc
+     SurfaceInterface *surface = SurfaceInterface::get(surface_resource);
+     OutputInterface *output = OutputInterface::get(output_resource);
+ 
+-    if (surface->buffer()) {
+-        wl_resource_post_error(resource->handle, error_already_constructed, "the wl_surface already has a buffer attached");
+-        return;
+-    }
+-
+     if (layer > layer_overlay) {
+         wl_resource_post_error(resource->handle, error_invalid_layer, "invalid layer %d", layer);
+         return;
+diff --git a/src/wayland/xdgshell.cpp b/src/wayland/xdgshell.cpp
+index 282678c0938..b8aded88e31 100644
+--- a/src/wayland/xdgshell.cpp
++++ b/src/wayland/xdgshell.cpp
+@@ -85,11 +85,6 @@ void XdgShellInterfacePrivate::xdg_wm_base_get_xdg_surface(Resource *resource, u
+ {
+     SurfaceInterface *surface = SurfaceInterface::get(surfaceResource);
+ 
+-    if (surface->buffer()) {
+-        wl_resource_post_error(resource->handle, XDG_SURFACE_ERROR_UNCONFIGURED_BUFFER, "xdg_surface must not have a buffer at creation");
+-        return;
+-    }
+-
+     wl_resource *xdgSurfaceResource = wl_resource_create(resource->client(), &xdg_surface_interface, resource->version(), id);
+ 
+     XdgSurfaceInterface *xdgSurface = new XdgSurfaceInterface(q, surface, xdgSurfaceResource);
+-- 
+GitLab
+

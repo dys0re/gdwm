@@ -1,0 +1,162 @@
+From 1a6871de0d17c7f65da8b96a703326437d736c17 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Thu, 29 May 2025 16:13:23 +0000
+Subject: [PATCH] wayland: Fix focused surface check in
+ wl_data_device.start_drag
+
+SeatInterface::focusedPointerSurface() contains the main surface, but the
+client can specify a subsurface.
+
+BUG: 497031
+
+
+(cherry picked from commit 40379821ee527ad7666de916f890852578c3a591)
+
+Co-authored-by: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+---
+ autotests/wayland/client/test_drag_drop.cpp | 95 +++++++++++++++++++++
+ src/wayland/datadevice.cpp                  |  2 +-
+ src/wayland/seat.cpp                        |  1 -
+ 3 files changed, 96 insertions(+), 2 deletions(-)
+
+diff --git a/autotests/wayland/client/test_drag_drop.cpp b/autotests/wayland/client/test_drag_drop.cpp
+index 86e033b4251..d2ea5b97804 100644
+--- a/autotests/wayland/client/test_drag_drop.cpp
++++ b/autotests/wayland/client/test_drag_drop.cpp
+@@ -42,6 +42,7 @@ private Q_SLOTS:
+     void cleanup();
+ 
+     void testPointerDragAndDrop();
++    void testPointerSubsurfaceDragAndDrop();
+     void testTouchDragAndDrop();
+     void testTouchSubsurfacesDragAndDrop();
+     void testDragAndDropWithCancelByDestroyDataSource();
+@@ -293,6 +294,100 @@ void TestDragAndDrop::testPointerDragAndDrop()
+     QVERIFY(pointerMotionSpy.isEmpty());
+ }
+ 
++void TestDragAndDrop::testPointerSubsurfaceDragAndDrop()
++{
++    // this test verifies drag and drop from a subsurface works
++    using namespace KWin;
++
++    std::unique_ptr<KWayland::Client::Surface> parentSurface(createSurface());
++    parentSurface->setSize(QSize(100, 100));
++    auto parentServerSurface = getServerSurface();
++    QVERIFY(parentServerSurface);
++
++    std::unique_ptr<KWayland::Client::Surface> childSurface(createSurface());
++    childSurface->setSize(QSize(100, 100));
++    std::unique_ptr<KWayland::Client::SubSurface> subSurface(createSubSurface(childSurface.get(), parentSurface.get()));
++    QVERIFY(subSurface);
++    subSurface->setPosition({0, 0});
++    auto childServerSurface = getServerSurface();
++    QVERIFY(childServerSurface);
++
++    QSignalSpy dataSourceSelectedActionChangedSpy(m_dataSource, &KWayland::Client::DataSource::selectedDragAndDropActionChanged);
++    auto timestamp = 2ms;
++
++    // now we need to pass pointer focus to the Surface and simulate a button press
++    QSignalSpy buttonPressSpy(m_pointer, &KWayland::Client::Pointer::buttonStateChanged);
++    m_seatInterface->setTimestamp(timestamp++);
++    m_seatInterface->notifyPointerEnter(parentServerSurface, QPointF(0, 0));
++    m_seatInterface->notifyPointerButton(1, PointerButtonState::Pressed);
++    m_seatInterface->notifyPointerFrame();
++    QVERIFY(buttonPressSpy.wait());
++    QCOMPARE(buttonPressSpy.first().at(1).value<quint32>(), quint32(2));
++
++    // add some signal spies for client side
++    QSignalSpy dragEnteredSpy(m_dataDevice, &KWayland::Client::DataDevice::dragEntered);
++    QSignalSpy dragMotionSpy(m_dataDevice, &KWayland::Client::DataDevice::dragMotion);
++    QSignalSpy pointerMotionSpy(m_pointer, &KWayland::Client::Pointer::motion);
++    QSignalSpy sourceDropSpy(m_dataSource, &KWayland::Client::DataSource::dragAndDropPerformed);
++
++    // now we can start the drag and drop
++    QSignalSpy dragStartedSpy(m_seatInterface, &SeatInterface::dragStarted);
++    m_dataSource->setDragAndDropActions(KWayland::Client::DataDeviceManager::DnDAction::Copy | KWayland::Client::DataDeviceManager::DnDAction::Move);
++    m_dataDevice->startDrag(buttonPressSpy.first().first().value<quint32>(), m_dataSource, childSurface.get());
++    QVERIFY(dragStartedSpy.wait());
++    QCOMPARE(m_seatInterface->dragSurface(), parentServerSurface);
++    QCOMPARE(m_seatInterface->dragSurfaceTransformation(), QMatrix4x4());
++    QVERIFY(!m_seatInterface->dragIcon());
++    QCOMPARE(SeatInterfacePrivate::get(m_seatInterface)->drag.dragImplicitGrabSerial, buttonPressSpy.first().first().value<quint32>());
++    QVERIFY(dragEnteredSpy.wait());
++    QCOMPARE(dragEnteredSpy.count(), 1);
++    QCOMPARE(dragEnteredSpy.first().first().value<quint32>(), m_display->serial());
++    QCOMPARE(dragEnteredSpy.first().last().toPointF(), QPointF(0, 0));
++    QCOMPARE(m_dataDevice->dragSurface().data(), parentSurface.get());
++    auto offer = m_dataDevice->dragOffer();
++    QVERIFY(offer);
++    QCOMPARE(offer->selectedDragAndDropAction(), KWayland::Client::DataDeviceManager::DnDAction::None);
++    QSignalSpy offerActionChangedSpy(offer, &KWayland::Client::DataOffer::selectedDragAndDropActionChanged);
++    QCOMPARE(m_dataDevice->dragOffer()->offeredMimeTypes().count(), 1);
++    QCOMPARE(m_dataDevice->dragOffer()->offeredMimeTypes().first().name(), QStringLiteral("text/plain"));
++    QTRY_COMPARE(offer->sourceDragAndDropActions(), KWayland::Client::DataDeviceManager::DnDAction::Copy | KWayland::Client::DataDeviceManager::DnDAction::Move);
++    offer->accept(QStringLiteral("text/plain"), dragEnteredSpy.last().at(0).toUInt());
++    offer->setDragAndDropActions(KWayland::Client::DataDeviceManager::DnDAction::Copy | KWayland::Client::DataDeviceManager::DnDAction::Move, KWayland::Client::DataDeviceManager::DnDAction::Move);
++    QVERIFY(offerActionChangedSpy.wait());
++    QCOMPARE(offerActionChangedSpy.count(), 1);
++    QCOMPARE(offer->selectedDragAndDropAction(), KWayland::Client::DataDeviceManager::DnDAction::Move);
++    QCOMPARE(dataSourceSelectedActionChangedSpy.count(), 1);
++    QCOMPARE(m_dataSource->selectedDragAndDropAction(), KWayland::Client::DataDeviceManager::DnDAction::Move);
++
++    // simulate motion
++    m_seatInterface->setTimestamp(timestamp++);
++    m_seatInterface->notifyPointerMotion(QPointF(3, 3));
++    m_seatInterface->notifyPointerFrame();
++    QVERIFY(dragMotionSpy.wait());
++    QCOMPARE(dragMotionSpy.count(), 1);
++    QCOMPARE(dragMotionSpy.first().first().toPointF(), QPointF(3, 3));
++    QCOMPARE(dragMotionSpy.first().last().toUInt(), 3u);
++
++    // simulate drop
++    QSignalSpy serverDragEndedSpy(m_seatInterface, &SeatInterface::dragEnded);
++    QSignalSpy droppedSpy(m_dataDevice, &KWayland::Client::DataDevice::dropped);
++    m_seatInterface->setTimestamp(timestamp++);
++    m_seatInterface->notifyPointerButton(1, PointerButtonState::Released);
++    m_seatInterface->notifyPointerFrame();
++    QVERIFY(sourceDropSpy.isEmpty());
++    QVERIFY(droppedSpy.wait());
++    QCOMPARE(sourceDropSpy.count(), 1);
++    QCOMPARE(serverDragEndedSpy.count(), 1);
++
++    QSignalSpy finishedSpy(m_dataSource, &KWayland::Client::DataSource::dragAndDropFinished);
++    offer->dragAndDropFinished();
++    QVERIFY(finishedSpy.wait());
++    delete offer;
++
++    // verify that we did not get any further input events
++    QVERIFY(pointerMotionSpy.isEmpty());
++}
++
+ void TestDragAndDrop::testTouchSubsurfacesDragAndDrop()
+ {
+     // this test verifies the very basic drag and drop on one surface, an enter, a move and the drop
+diff --git a/src/wayland/datadevice.cpp b/src/wayland/datadevice.cpp
+index c28f4265c15..1becb8290df 100644
+--- a/src/wayland/datadevice.cpp
++++ b/src/wayland/datadevice.cpp
+@@ -84,7 +84,7 @@ void DataDeviceInterfacePrivate::data_device_start_drag(Resource *resource,
+                                                         wl_resource *iconResource,
+                                                         uint32_t serial)
+ {
+-    SurfaceInterface *focusSurface = SurfaceInterface::get(originResource);
++    SurfaceInterface *focusSurface = SurfaceInterface::get(originResource)->mainSurface();
+     DataSourceInterface *dataSource = nullptr;
+     if (sourceResource) {
+         dataSource = DataSourceInterface::get(sourceResource);
+diff --git a/src/wayland/seat.cpp b/src/wayland/seat.cpp
+index ff828913528..5520255a8a1 100644
+--- a/src/wayland/seat.cpp
++++ b/src/wayland/seat.cpp
+@@ -1297,7 +1297,6 @@ void SeatInterface::startDrag(AbstractDataSource *dragSource, SurfaceInterface *
+     if (d->drag.mode != SeatInterfacePrivate::Drag::Mode::None) {
+         return;
+     }
+-    originSurface = originSurface->mainSurface();
+ 
+     if (hasImplicitPointerGrab(dragSerial)) {
+         d->drag.mode = SeatInterfacePrivate::Drag::Mode::Pointer;
+-- 
+GitLab
+

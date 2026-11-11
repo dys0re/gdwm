@@ -1,0 +1,37 @@
+From 572fee09a82c9cc51c3fc10d09c989dc4b360766 Mon Sep 17 00:00:00 2001
+From: David Edmundson <david@davidedmundson.co.uk>
+Date: Tue, 27 May 2025 15:15:39 +0000
+Subject: [PATCH] effects/slideback: Also check activity when matching windows
+
+When a window is raised, we compare which windows we have to move.
+
+Otherwise it gets managed, but never painted, and thus never cleared,
+this corrupts the stacking order.
+
+BUG: 455429
+
+
+(cherry picked from commit 0ed015cc8adc86c860b3a87555b2574d94999a4c)
+
+Co-authored-by: David Edmundson <kde@davidedmundson.co.uk>
+---
+ src/plugins/slideback/slideback.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/plugins/slideback/slideback.cpp b/src/plugins/slideback/slideback.cpp
+index 21e5e295a11..7ea188847b7 100644
+--- a/src/plugins/slideback/slideback.cpp
++++ b/src/plugins/slideback/slideback.cpp
+@@ -67,7 +67,8 @@ void SlideBackEffect::windowRaised(EffectWindow *w)
+                 currentFound = true;
+             }
+         } else {
+-            if (isWindowUsable(tmp) && tmp->isOnCurrentDesktop() && w->isOnCurrentDesktop()) {
++            if (isWindowUsable(tmp) && tmp->isOnCurrentDesktop() && w->isOnCurrentDesktop()
++                && tmp->isOnCurrentActivity() && w->isOnCurrentActivity()) {
+                 // Do we have to move it?
+                 if (intersects(w, tmp->frameGeometry().toRect())) {
+                     QRect slideRect;
+-- 
+GitLab
+

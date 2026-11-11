@@ -1,0 +1,53 @@
+From 602072c9ccc50e0d2b9534dda9d306e20c85bf99 Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Thu, 3 Apr 2025 18:20:08 +0200
+Subject: [PATCH] backends/drm: remove unused method
+
+---
+ src/backends/drm/drm_commit_thread.cpp | 17 -----------------
+ src/backends/drm/drm_commit_thread.h   |  8 --------
+ 2 files changed, 25 deletions(-)
+
+--- a/src/backends/drm/drm_commit_thread.cpp
++++ b/src/backends/drm/drm_commit_thread.cpp
+@@ -390,23 +390,6 @@ std::chrono::nanoseconds DrmCommitThread
+     return m_safetyMargin;
+ }
+ 
+-bool DrmCommitThread::drain()
+-{
+-    std::unique_lock lock(m_mutex);
+-    if (m_committed) {
+-        return true;
+-    }
+-    if (m_commits.empty()) {
+-        return false;
+-    }
+-    if (m_commits.size() > 1) {
+-        m_commits.front() = mergeCommits(m_commits);
+-        m_commits.erase(m_commits.begin() + 1, m_commits.end());
+-    }
+-    submit();
+-    return m_committed != nullptr;
+-}
+-
+ void DrmCommitThread::handlePing()
+ {
+     // this will process the pageflip and call pageFlipped if there is one
+--- a/src/backends/drm/drm_commit_thread.h
++++ b/src/backends/drm/drm_commit_thread.h
+@@ -43,14 +43,6 @@ public:
+      */
+     std::chrono::nanoseconds safetyMargin() const;
+ 
+-    /**
+-     * attempts to submit the currently scheduled commits as a single one,
+-     * if there isn't already a commit pending
+-     *
+-     * @returns if there's a pending commit after this method returns
+-     */
+-    bool drain();
+-
+ private:
+     void clearDroppedCommits();
+     TimePoint estimateNextVblank(TimePoint now) const;

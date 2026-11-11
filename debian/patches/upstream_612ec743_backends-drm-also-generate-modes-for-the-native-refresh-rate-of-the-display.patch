@@ -1,0 +1,316 @@
+From 612ec743b30c8a9c38553b6134b92f0de0ae3cad Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@kde.org>
+Date: Fri, 23 May 2025 16:50:01 +0200
+Subject: [PATCH] backends/drm: also generate modes for the native refresh rate
+ of the display
+
+As we only do this when the scaling mode is available, it should be pretty safe,
+and these modes avoid driver issues where the refresh rate isn't switched to 60Hz.
+
+BUG: 504655
+
+
+(cherry picked from commit 6d82dbcb7f344db3e3e772f91ec738b9e431681d)
+
+Co-authored-by: Xaver Hugl <xaver.hugl@kde.org>
+---
+From: Aurélien COUDERC <coucouf@debian.org>
+Adapted to apply against Plasma 6.3
+---
+ autotests/drm/drmTest.cpp          | 203 +++++++++++++++++------------
+ src/backends/drm/drm_connector.cpp |  33 +++--
+ 2 files changed, 142 insertions(+), 94 deletions(-)
+
+diff --git a/autotests/drm/drmTest.cpp b/autotests/drm/drmTest.cpp
+index f6ee1b8d15a..8ee2539173b 100644
+--- a/autotests/drm/drmTest.cpp
++++ b/autotests/drm/drmTest.cpp
+@@ -202,88 +202,123 @@ void DrmTest::testZeroModesHandling()
+     verifyCleanup(mockGpu.get());
+ }
+ 
++// because QFETCH as a macro doesn't like commas in the type name
++using Mode = std::pair<QSize, uint32_t>;
++
+ void DrmTest::testModeGeneration_data()
+ {
+-    QTest::addColumn<QSize>("nativeMode");
+-    QTest::addColumn<QList<QSize>>("expectedModes");
+-
+-    QTest::newRow("2160p") << QSize(3840, 2160) << QList<QSize>{
+-        QSize(1600, 1200),
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(2560, 1600),
+-        QSize(1920, 1200),
+-        QSize(1280, 800),
+-        QSize(3840, 2160),
+-        QSize(3200, 1800),
+-        QSize(2880, 1620),
+-        QSize(2560, 1440),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++    QTest::addColumn<Mode>("nativeMode");
++    QTest::addColumn<QList<Mode>>("expectedModes");
++
++    QTest::newRow("2160p") << std::make_pair(QSize(3840, 2160), 60u) << QList<Mode>{
++        std::make_pair(QSize(1600, 1200), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(2560, 1600), 60),
++        std::make_pair(QSize(1920, 1200), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(3840, 2160), 60),
++        std::make_pair(QSize(3200, 1800), 60),
++        std::make_pair(QSize(2880, 1620), 60),
++        std::make_pair(QSize(2560, 1440), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+-    QTest::newRow("1440p") << QSize(2560, 1440) << QList<QSize>{
+-        QSize(1600, 1200),
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(1920, 1200),
+-        QSize(1280, 800),
+-        QSize(2560, 1440),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++
++    QTest::newRow("2160p") << std::make_pair(QSize(3840, 2160), 120u) << QList<Mode>{
++        std::make_pair(QSize(1600, 1200), 120),
++        std::make_pair(QSize(1280, 1024), 120),
++        std::make_pair(QSize(1024, 768), 120),
++        std::make_pair(QSize(2560, 1600), 120),
++        std::make_pair(QSize(1920, 1200), 120),
++        std::make_pair(QSize(1280, 800), 120),
++        std::make_pair(QSize(3840, 2160), 120),
++        std::make_pair(QSize(3200, 1800), 120),
++        std::make_pair(QSize(2880, 1620), 120),
++        std::make_pair(QSize(2560, 1440), 120),
++        std::make_pair(QSize(1920, 1080), 120),
++        std::make_pair(QSize(1600, 900), 120),
++        std::make_pair(QSize(1368, 768), 120),
++        std::make_pair(QSize(1280, 720), 120),
++        std::make_pair(QSize(1600, 1200), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(2560, 1600), 60),
++        std::make_pair(QSize(1920, 1200), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(3840, 2160), 60),
++        std::make_pair(QSize(3200, 1800), 60),
++        std::make_pair(QSize(2880, 1620), 60),
++        std::make_pair(QSize(2560, 1440), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+-    QTest::newRow("1080p") << QSize(1920, 1080) << QList<QSize>{
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(1280, 800),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++
++    QTest::newRow("1440p") << std::make_pair(QSize(2560, 1440), 60u) << QList<Mode>{
++        std::make_pair(QSize(1600, 1200), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(1920, 1200), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(2560, 1440), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
++    };
++    QTest::newRow("1080p") << std::make_pair(QSize(1920, 1080), 60u) << QList<Mode>{
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+ 
+-    QTest::newRow("2160p 21:9") << QSize(5120, 2160) << QList<QSize>{
+-        QSize(5120, 2160),
+-        QSize(1600, 1200),
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(2560, 1600),
+-        QSize(1920, 1200),
+-        QSize(1280, 800),
+-        QSize(3840, 2160),
+-        QSize(3200, 1800),
+-        QSize(2880, 1620),
+-        QSize(2560, 1440),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++    QTest::newRow("2160p 21:9") << std::make_pair(QSize(5120, 2160), 60u) << QList<Mode>{
++        std::make_pair(QSize(5120, 2160), 60),
++        std::make_pair(QSize(1600, 1200), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(2560, 1600), 60),
++        std::make_pair(QSize(1920, 1200), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(3840, 2160), 60),
++        std::make_pair(QSize(3200, 1800), 60),
++        std::make_pair(QSize(2880, 1620), 60),
++        std::make_pair(QSize(2560, 1440), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+-    QTest::newRow("1440p 21:9") << QSize(3440, 1440) << QList<QSize>{
+-        QSize(3440, 1440),
+-        QSize(1600, 1200),
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(1920, 1200),
+-        QSize(1280, 800),
+-        QSize(2560, 1440),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++    QTest::newRow("1440p 21:9") << std::make_pair(QSize(3440, 1440), 60u) << QList<Mode>{
++        std::make_pair(QSize(3440, 1440), 60),
++        std::make_pair(QSize(1600, 1200), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(1920, 1200), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(2560, 1440), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+-    QTest::newRow("1080p 21:9") << QSize(2560, 1080) << QList<QSize>{
+-        QSize(2560, 1080),
+-        QSize(1280, 1024),
+-        QSize(1024, 768),
+-        QSize(1280, 800),
+-        QSize(1920, 1080),
+-        QSize(1600, 900),
+-        QSize(1368, 768),
+-        QSize(1280, 720),
++    QTest::newRow("1080p 21:9") << std::make_pair(QSize(2560, 1080), 60u) << QList<Mode>{
++        std::make_pair(QSize(2560, 1080), 60),
++        std::make_pair(QSize(1280, 1024), 60),
++        std::make_pair(QSize(1024, 768), 60),
++        std::make_pair(QSize(1280, 800), 60),
++        std::make_pair(QSize(1920, 1080), 60),
++        std::make_pair(QSize(1600, 900), 60),
++        std::make_pair(QSize(1368, 768), 60),
++        std::make_pair(QSize(1280, 720), 60),
+     };
+ }
+ 
+@@ -299,11 +334,13 @@ void DrmTest::testModeGeneration()
+     const auto renderBackend = backend->createQPainterBackend();
+     auto gpu = std::make_unique<DrmGpu>(backend.get(), mockGpu->fd, DrmDevice::open(mockGpu->devNode));
+ 
+-    QFETCH(QSize, nativeMode);
+-    QFETCH(QList<QSize>, expectedModes);
++    QFETCH(Mode, nativeMode);
++    QFETCH(QList<Mode>, expectedModes);
++
++    const auto &[nativeSize, nativeRefreshHz] = nativeMode;
+ 
+     conn->modes.clear();
+-    conn->addMode(nativeMode.width(), nativeMode.height(), 60);
++    conn->addMode(nativeSize.width(), nativeSize.height(), nativeRefreshHz);
+     QVERIFY(gpu->updateOutputs());
+     QCOMPARE(gpu->drmOutputs().size(), 1);
+     // no mode generation without the scaling property
+@@ -319,10 +356,14 @@ void DrmTest::testModeGeneration()
+     DrmOutput *const output = gpu->drmOutputs().front();
+     QCOMPARE(output->modes().size(), expectedModes.size());
+     for (const auto &mode : output->modes()) {
+-        QVERIFY(expectedModes.contains(mode->size()));
+-        QVERIFY(mode->size().width() <= nativeMode.width());
+-        QVERIFY(mode->size().height() <= nativeMode.height());
+-        QVERIFY(mode->refreshRate() <= 60000);
++        const auto it = std::ranges::find_if(expectedModes, [mode](const auto &expectedMode) {
++            return mode->size() == expectedMode.first
++                && std::round(mode->refreshRate() / 1000.0) == expectedMode.second;
++        });
++        QVERIFY(it != expectedModes.end());
++        QVERIFY(mode->size().width() <= nativeSize.width());
++        QVERIFY(mode->size().height() <= nativeSize.height());
++        QCOMPARE_LE(mode->refreshRate(), nativeRefreshHz * 1000);
+     }
+ 
+     gpu.reset();
+diff --git a/src/backends/drm/drm_connector.cpp b/src/backends/drm/drm_connector.cpp
+index db3815b247f..c5995e95fd9 100644
+--- a/src/backends/drm/drm_connector.cpp
++++ b/src/backends/drm/drm_connector.cpp
+@@ -372,27 +372,34 @@ QList<std::shared_ptr<DrmConnectorMode>> DrmConnector::generateCommonModes()
+ {
+     QList<std::shared_ptr<DrmConnectorMode>> ret;
+     QSize maxSize;
+-    uint32_t maxSizeRefreshRate = 0;
++    uint64_t maxSizeRefreshRate = 0;
+     for (const auto &mode : std::as_const(m_driverModes)) {
+         if (mode->size().width() >= maxSize.width() && mode->size().height() >= maxSize.height() && mode->refreshRate() >= maxSizeRefreshRate) {
+             maxSize = mode->size();
+             maxSizeRefreshRate = mode->refreshRate();
+         }
+     }
+-    const uint64_t maxBandwidthEstimation = maxSize.width() * maxSize.height() * uint64_t(maxSizeRefreshRate);
++    const uint64_t maxBandwidthEstimation = maxSize.width() * maxSize.height() * maxSizeRefreshRate;
++    QList<uint64_t> refreshRates = {60000ul};
++    if (maxSizeRefreshRate > 60000ul) {
++        refreshRates.push_back(maxSizeRefreshRate);
++    }
+     for (const auto &size : s_commonModes) {
+-        const uint64_t bandwidthEstimation = size.width() * size.height() * 60000ull;
+-        if (size.width() > maxSize.width() || size.height() > maxSize.height() || bandwidthEstimation > maxBandwidthEstimation) {
+-            continue;
+-        }
+-        const auto generatedMode = generateMode(size, 60);
+-        const bool alreadyExists = std::ranges::any_of(m_driverModes, [generatedMode](const auto &mode) {
+-            return mode->size() == generatedMode->size() && mode->refreshRate() == generatedMode->refreshRate();
+-        });
+-        if (alreadyExists) {
+-            continue;
++        for (uint64_t refreshRate : refreshRates) {
++            const uint64_t bandwidthEstimation = size.width() * size.height() * refreshRate;
++            if (size.width() > maxSize.width() || size.height() > maxSize.height() || bandwidthEstimation > maxBandwidthEstimation) {
++                continue;
++            }
++            const auto generatedMode = generateMode(size, refreshRate / 1000.0);
++            const bool alreadyExists = std::ranges::any_of(m_driverModes, [generatedMode](const auto &mode) {
++                return mode->size() == generatedMode->size()
++                    && std::round(mode->refreshRate() / 1000.0) == std::round(generatedMode->refreshRate() / 1000.0);
++            });
++            if (alreadyExists) {
++                continue;
++            }
++            ret.push_back(generatedMode);
+         }
+-        ret << generatedMode;
+     }
+     return ret;
+ }
+-- 
+GitLab
+

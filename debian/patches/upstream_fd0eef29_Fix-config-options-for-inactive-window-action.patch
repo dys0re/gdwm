@@ -1,0 +1,57 @@
+From fd0eef29d8c3cb55040ffacfcf77b17d87935ac2 Mon Sep 17 00:00:00 2001
+From: John Kizer <john.kizer@proton.me>
+Date: Wed, 30 Apr 2025 08:45:34 -0400
+Subject: [PATCH] Fix config options for inactive window action
+
+The "Activate, pass click and raise on release" option was added to the Window Actions Inactive Inner Window left click dropdown, but in this file was instead added to the Titlebar actions list: https://invent.kde.org/plasma/kwin/-/merge_requests/6555/diffs?file=794ca93c1a0a39541fac0b789307cde9ec80df1d#diff-content-794ca93c1a0a39541fac0b789307cde9ec80df1d
+
+This moves the added config file option to the Inner Window section, which should help it operate as expected when non-default options are selected.
+
+BUG: 501457
+---
+ src/kcms/options/kwinoptions_settings.kcfg | 6 +++---
+ src/kwin.kcfg                              | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/kcms/options/kwinoptions_settings.kcfg b/src/kcms/options/kwinoptions_settings.kcfg
+index 1d22c22d725..3b97101f058 100644
+--- a/src/kcms/options/kwinoptions_settings.kcfg
++++ b/src/kcms/options/kwinoptions_settings.kcfg
+@@ -201,9 +201,8 @@
+     </entry>
+ 
+     <entry key="CommandInactiveTitlebar1" type="Enum">
+-        <default>ActivateRaiseOnReleaseAndPassClick</default>
++        <default>ActivateAndRaise</default>
+         <choices>
+-            <choice name="ActivateRaiseOnReleaseAndPassClick" value="Activate, pass click and raise on release"></choice>
+             <choice name="ActivateAndRaise" value="Activate and raise"></choice>
+             <choice name="ActivateAndLower" value="Activate and lower"></choice>
+             <choice name="Activate"></choice>
+@@ -253,8 +252,9 @@
+     </entry>
+ 
+     <entry key="CommandWindow1" type="Enum">
+-      <default>ActivateRaisePassClick</default>
++      <default>ActivateRaiseOnReleaseAndPassClick</default>
+       <choices>
++          <choice name="ActivateRaiseOnReleaseAndPassClick" value="Activate, pass click and raise on release"></choice>
+           <choice name="ActivateRaisePassClick" value="Activate, raise and pass click"></choice>
+           <choice name="ActivatePassClick" value="Activate and pass click"></choice>
+           <choice name="Activate"></choice>
+diff --git a/src/kwin.kcfg b/src/kwin.kcfg
+index bcbb1e8678e..985696ef2cf 100644
+--- a/src/kwin.kcfg
++++ b/src/kwin.kcfg
+@@ -25,7 +25,7 @@
+             <default>Operations menu</default>
+         </entry>
+         <entry name="CommandInactiveTitlebar1" type="String">
+-            <default>Activate, pass click and raise on release</default>
++            <default>Activate and raise</default>
+         </entry>
+         <entry name="CommandInactiveTitlebar2" type="String">
+             <default>Nothing</default>
+-- 
+GitLab
+

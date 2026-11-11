@@ -1,0 +1,39 @@
+From 98b64e9bff63fb7742a260f3f83b78cba3605c92 Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Thu, 26 Jun 2025 16:53:42 +0200
+Subject: [PATCH] backends/drm: allow night light to get closer to the edges of
+ the gamut
+
+The limit changes the result vs. 6.2 / kwin_x11. 0.0001 is enough to prevent the
+math from going crazy, and changes the result a lot less.
+
+BUG: 505495
+
+
+(cherry picked from commit 29dc8ee4cacb6372c0d93c784a18059158b6f1b9)
+
+Co-authored-by: Xaver Hugl <xaver.hugl@kde.org>
+---
+ src/backends/drm/drm_output.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/backends/drm/drm_output.cpp b/src/backends/drm/drm_output.cpp
+index a76fd12aaf6..a34d29c8258 100644
+--- a/src/backends/drm/drm_output.cpp
++++ b/src/backends/drm/drm_output.cpp
+@@ -441,9 +441,9 @@ static QVector3D adaptChannelFactors(const ColorDescription &originalColor, cons
+     QVector3D adaptedChannelFactors = ColorDescription::sRGB.containerColorimetry().relativeColorimetricTo(originalColor.containerColorimetry()) * sRGBchannelFactors;
+     // ensure none of the values reach zero, otherwise the white point might end up on or outside
+     // the edges of the gamut, which leads to terrible glitches
+-    adaptedChannelFactors.setX(std::max(adaptedChannelFactors.x(), 0.01f));
+-    adaptedChannelFactors.setY(std::max(adaptedChannelFactors.y(), 0.01f));
+-    adaptedChannelFactors.setZ(std::max(adaptedChannelFactors.z(), 0.01f));
++    adaptedChannelFactors.setX(std::max(adaptedChannelFactors.x(), 0.0001f));
++    adaptedChannelFactors.setY(std::max(adaptedChannelFactors.y(), 0.0001f));
++    adaptedChannelFactors.setZ(std::max(adaptedChannelFactors.z(), 0.0001f));
+     return adaptedChannelFactors;
+ }
+ 
+-- 
+GitLab
+

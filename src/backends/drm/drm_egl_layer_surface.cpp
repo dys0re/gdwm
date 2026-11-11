@@ -408,7 +408,7 @@ bool EglGbmLayerSurface::checkSurface(const QSize &size, const QHash<uint32_t, Q
 
 bool EglGbmLayerSurface::doesSurfaceFit(Surface *surface, const QSize &size, const QHash<uint32_t, QList<uint64_t>> &formats, Output::ColorPowerTradeoff tradeoff) const
 {
-    if (!surface || !surface->gbmSwapchain || surface->gbmSwapchain->size() != size) {
+    if (!surface || surface->needsRecreation || !surface->gbmSwapchain || surface->gbmSwapchain->size() != size) {
         return false;
     }
     if (surface->tradeoff != tradeoff) {
@@ -635,6 +635,19 @@ std::shared_ptr<DrmFramebuffer> EglGbmLayerSurface::importWithEgl(Surface *surfa
     }
 
     if (!surface->importContext->makeCurrent()) {
+        qCWarning(KWIN_DRM, "Failed to make import context current");
+        // this is probably caused by a GPU reset, let's not take any chances
+        surface->needsRecreation = true;
+        m_eglBackend->resetContextForGpu(m_gpu);
+        return nullptr;
+    }
+    const auto restoreContext = qScopeGuard([this]() {
+        m_eglBackend->makeCurrent();
+    });
+    if (surface->importContext->checkGraphicsResetStatus() != GL_NO_ERROR) {
+        qCWarning(KWIN_DRM, "Detected GPU reset on secondary GPU %s", qPrintable(m_gpu->drmDevice()->path()));
+        surface->needsRecreation = true;
+        m_eglBackend->resetContextForGpu(m_gpu);
         return nullptr;
     }
     std::unique_ptr<GLRenderTimeQuery> renderTime;
@@ -703,8 +716,6 @@ std::shared_ptr<DrmFramebuffer> EglGbmLayerSurface::importWithEgl(Surface *surfa
         frame->addRenderTimeQuery(std::move(renderTime));
     }
 
-    // restore the old context
-    m_eglBackend->makeCurrent();
     return m_gpu->importBuffer(slot->buffer(), endFence.takeFileDescriptor());
 }
 

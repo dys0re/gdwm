@@ -126,6 +126,9 @@ void XdgSurfaceWindow::sendConfigure()
     configureEvent->flags |= m_configureFlags;
     configureEvent->scale = m_nextTargetScale;
     m_configureFlags = {};
+    if (!isInteractiveMoveResize()) {
+        m_nextGravity = Gravity::None;
+    }
 
     m_configureEvents.append(configureEvent);
 }
@@ -269,8 +272,12 @@ void XdgSurfaceWindow::moveResizeInternal(const QRectF &rect, MoveResizeMode mod
         // and current client sizes have to be rounded to integers
         const QSizeF requestedFrameSize = snapToPixels(rect.size(), nextTargetScale());
         const QSizeF requestedClientSize = nextFrameSizeToClientSize(requestedFrameSize);
-        if (requestedClientSize.toSize() == clientSize().toSize()) {
-            updateGeometry(QRectF(rect.topLeft(), requestedFrameSize));
+        const QSize roundedRequestedClientSize = requestedClientSize.toSize();
+
+        const QSize roundedClientSize = clientSize().toSize();
+        if (roundedRequestedClientSize == roundedClientSize) {
+            const QRectF snappedRect = QRectF(rect.topLeft(), nextClientSizeToFrameSize(snapToPixels(roundedClientSize, nextTargetScale())));
+            updateGeometry(gravitateGeometry(snappedRect, rect, m_nextGravity));
         } else {
             m_configureFlags |= XdgSurfaceConfigure::ConfigurePosition;
             scheduleConfigure();

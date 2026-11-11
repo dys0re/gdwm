@@ -1,0 +1,45 @@
+From 889ffed2bbb40c44dbb8ef4268e5e0bbcb7671da Mon Sep 17 00:00:00 2001
+From: Michael Weghorn <m.weghorn@posteo.de>
+Date: Mon, 7 Jul 2025 13:09:38 +0200
+Subject: [PATCH] A11yKeyboardMonitor: Distinguish modifier and other key
+
+When processing a key event, only update
+A11yKeyboardMonitor::lastModifier and
+A11yKeyboardMonitor::lastModifierTime if
+the pressed key is actually a modifier.
+
+Otherwise, the "if the modifier was pressed twice within the
+key repeat delay process it normally" logic above would
+trigger when pressing a non-modifier key twice within
+the key repeat delay time, breaking e.g. Orca's structural
+navigation when pressing "H" twice to jump to the heading
+after the next, and instead result in a literal "h" getting
+inserted when input is accepted (e.g. in an editable
+LibreOffice Writer document).
+
+BUG: 506715
+---
+ src/a11ykeyboardmonitor.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/a11ykeyboardmonitor.cpp b/src/a11ykeyboardmonitor.cpp
+index 3b7e5fa357a..5dad8add460 100644
+--- a/src/a11ykeyboardmonitor.cpp
++++ b/src/a11ykeyboardmonitor.cpp
+@@ -74,10 +74,10 @@ bool A11yKeyboardMonitor::processKey(uint32_t key, KeyboardKeyState state, std::
+             return false;
+         }
+ 
+-        data.lastModifier = keysym;
+-        data.lastModifierTime = time;
+-
+         if (data.modifiers.contains(keysym)) {
++            data.lastModifier = keysym;
++            data.lastModifierTime = time;
++
+             if (released) {
+                 data.pressedModifiers.remove(keysym);
+             } else {
+-- 
+GitLab
+

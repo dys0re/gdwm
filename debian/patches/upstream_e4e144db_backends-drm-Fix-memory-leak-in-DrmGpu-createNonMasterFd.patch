@@ -1,0 +1,31 @@
+From e4e144db2115a29e354425e56489e2b1abb07b80 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Mon, 7 Jul 2025 12:08:05 +0000
+Subject: [PATCH] backends/drm: Fix memory leak in DrmGpu::createNonMasterFd
+
+drmGetDeviceNameFromFd2 returns an allocated string, which means we
+should free it.
+
+
+(cherry picked from commit e6e3431da596e7580c367ea1ed13b1b614638026)
+
+Co-authored-by: Myrrh Periwinkle <myrrhperiwinkle@qtmlabs.xyz>
+---
+ src/backends/drm/drm_gpu.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/backends/drm/drm_gpu.cpp b/src/backends/drm/drm_gpu.cpp
+index 35cccaa1ad3..2dd35108d7a 100644
+--- a/src/backends/drm/drm_gpu.cpp
++++ b/src/backends/drm/drm_gpu.cpp
+@@ -122,6 +122,7 @@ FileDescriptor DrmGpu::createNonMasterFd() const
+ {
+     char *path = drmGetDeviceNameFromFd2(m_fd);
+     FileDescriptor fd{open(path, O_RDWR | O_CLOEXEC)};
++    free(path);
+     if (!fd.isValid()) {
+         qCWarning(KWIN_DRM) << "Could not open DRM fd for leasing!" << strerror(errno);
+     } else {
+-- 
+GitLab
+

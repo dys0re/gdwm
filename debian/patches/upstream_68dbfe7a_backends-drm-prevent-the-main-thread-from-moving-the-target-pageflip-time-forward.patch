@@ -1,0 +1,42 @@
+From 68dbfe7ac42974716e72e8ae3b59cdec14721d3f Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Thu, 5 Sep 2024 16:04:16 +0200
+Subject: [PATCH] backends/drm: prevent the main thread from moving the target
+ pageflip time forward
+
+When the commit thread moves the target back by one refresh cycle, there's some time where
+estimateNextVblank will still return the old target - so if the main thread adds another
+commit to the queue and overrides the target, the commit thread's action would be undone.
+---
+ src/backends/drm/drm_commit_thread.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+--- a/src/backends/drm/drm_commit_thread.cpp
++++ b/src/backends/drm/drm_commit_thread.cpp
+@@ -23,6 +23,7 @@ namespace KWin
+ 
+ DrmCommitThread::DrmCommitThread(DrmGpu *gpu, const QString &name)
+     : m_gpu(gpu)
++    , m_targetPageflipTime(std::chrono::steady_clock::now())
+ {
+     if (!gpu->atomicModeSetting()) {
+         return;
+@@ -313,13 +314,15 @@ void DrmCommitThread::addCommit(std::uni
+     std::unique_lock lock(m_mutex);
+     m_commits.push_back(std::move(commit));
+     const auto now = std::chrono::steady_clock::now();
++    TimePoint newTarget;
+     if (m_tearing) {
+-        m_targetPageflipTime = now;
++        newTarget = now;
+     } else if (m_vrr && now >= m_lastPageflip + m_minVblankInterval) {
+-        m_targetPageflipTime = now;
++        newTarget = now;
+     } else {
+-        m_targetPageflipTime = estimateNextVblank(now);
++        newTarget = estimateNextVblank(now);
+     }
++    m_targetPageflipTime = std::max(m_targetPageflipTime, newTarget);
+     m_commits.back()->setDeadline(m_targetPageflipTime - m_safetyMargin);
+     m_commitPending.notify_all();
+ }

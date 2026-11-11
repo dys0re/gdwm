@@ -132,6 +132,11 @@ std::shared_ptr<EglContext> EglGbmBackend::contextForGpu(DrmGpu *gpu)
     return ret;
 }
 
+void EglGbmBackend::resetContextForGpu(DrmGpu *gpu)
+{
+    m_contexts.erase(gpu->eglDisplay());
+}
+
 std::unique_ptr<SurfaceTexture> EglGbmBackend::createSurfaceTextureWayland(SurfacePixmap *pixmap)
 {
     return std::make_unique<BasicEGLSurfaceTextureWayland>(this, pixmap);

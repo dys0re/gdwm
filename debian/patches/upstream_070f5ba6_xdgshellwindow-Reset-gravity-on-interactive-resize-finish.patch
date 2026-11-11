@@ -1,0 +1,39 @@
+From 070f5ba65150bb5ecca4bc7f969d8db44e1203a0 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Tue, 1 Jul 2025 06:42:43 +0000
+Subject: [PATCH] xdgshellwindow: Reset gravity on interactive resize finish
+
+Prevent a maximize operation from accidentally reusing whatever resize
+gravity a previous interactive resize operation used.
+
+This fixes an issue where windows may be placed at a non-0,0 coordinate
+after a maximize on fractionally scaled displays if the window was
+previously resized from the top edge, potentially allowing mouse clicks
+on the top of the display to reach windows underneath the maximized
+window.
+
+
+(cherry picked from commit 0d929de7f0aad8bfd07075bf189cb19ee46f6815)
+
+Co-authored-by: Myrrh Periwinkle <myrrhperiwinkle@qtmlabs.xyz>
+---
+ src/xdgshellwindow.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/xdgshellwindow.cpp b/src/xdgshellwindow.cpp
+index f0726ca3acd..42c3d8b595e 100644
+--- a/src/xdgshellwindow.cpp
++++ b/src/xdgshellwindow.cpp
+@@ -125,6 +125,9 @@ void XdgSurfaceWindow::sendConfigure()
+     configureEvent->flags |= m_configureFlags;
+     configureEvent->scale = m_nextTargetScale;
+     m_configureFlags = {};
++    if (!isInteractiveMoveResize()) {
++        m_nextGravity = Gravity::None;
++    }
+ 
+     m_configureEvents.append(configureEvent);
+ }
+-- 
+GitLab
+

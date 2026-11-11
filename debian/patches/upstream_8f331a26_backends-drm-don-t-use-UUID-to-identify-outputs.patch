@@ -1,0 +1,90 @@
+From 8f331a268cf1e457b8727080763869e1b426dae8 Mon Sep 17 00:00:00 2001
+From: Xaver Hugl <xaver.hugl@gmail.com>
+Date: Fri, 4 Jul 2025 15:57:25 +0200
+Subject: [PATCH] backends/drm: don't use UUID to identify outputs
+
+The UUID is only set later by the output configuration system, so it can't be used in
+the drm backend when deciding the dpms state of a "new" output.
+This changes it to use EDID ID, EDID hash or connector name instead, which are valid
+much earlier and are reliable enough for the dpms workaround.
+
+BUG: 493879
+BUG: 506135
+BUG: 505953
+
+
+(cherry picked from commit e177e1d2da8a278f85d5d3e24ffdc01e7c2eaca6)
+
+Co-authored-by: Xaver Hugl <xaver.hugl@kde.org>
+---
+From: Aurélien COUDERC <coucouf@debian.org>
+Adapted to apply against Plasma 6.3
+---
+ src/backends/drm/drm_backend.cpp | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/src/backends/drm/drm_backend.cpp b/src/backends/drm/drm_backend.cpp
+index 0b95e790396..17da998da49 100644
+--- a/src/backends/drm/drm_backend.cpp
++++ b/src/backends/drm/drm_backend.cpp
+@@ -234,12 +234,28 @@ DrmGpu *DrmBackend::addGpu(const QString &fileName)
+     return gpu;
+ }
+ 
++static QString earlyIdentifier(Output *output)
++{
++    // We can't use the output's UUID because that's only set later, by the output config system.
++    // This doesn't need to be perfectly accurate though, sometimes getting a false positive is ok,
++    // so this just uses EDID ID, EDID hash or connector name, whichever is available
++    if (output->edid().isValid()) {
++        if (!output->edid().identifier().isEmpty()) {
++            return output->edid().identifier();
++        } else {
++            return output->edid().hash();
++        }
++    } else {
++        return output->name();
++    }
++}
++
+ void DrmBackend::addOutput(DrmAbstractOutput *o)
+ {
+     const bool allOff = std::ranges::all_of(m_outputs, [](Output *output) {
+         return output->dpmsMode() != Output::DpmsMode::On;
+     });
+-    if (allOff && m_recentlyUnpluggedDpmsOffOutputs.contains(o->uuid())) {
++    if (allOff && m_recentlyUnpluggedDpmsOffOutputs.contains(earlyIdentifier(o))) {
+         if (DrmOutput *drmOutput = qobject_cast<DrmOutput *>(o)) {
+             // When the system is in dpms power saving mode, KWin turns on all outputs if the user plugs a new output in
+             // as that's an intentional action and they expect to see the output light up.
+@@ -248,7 +264,7 @@ void DrmBackend::addOutput(DrmAbstractOutput *o)
+             drmOutput->updateDpmsMode(Output::DpmsMode::Off);
+             drmOutput->pipeline()->setActive(false);
+             drmOutput->renderLoop()->inhibit();
+-            m_recentlyUnpluggedDpmsOffOutputs.removeOne(drmOutput->uuid());
++            m_recentlyUnpluggedDpmsOffOutputs.removeOne(earlyIdentifier(drmOutput));
+         }
+     }
+     m_outputs.append(o);
+@@ -268,7 +284,7 @@ static const int s_dpmsTimeout = environmentVariableIntValue("KWIN_DPMS_WORKAROU
+ void DrmBackend::removeOutput(DrmAbstractOutput *o)
+ {
+     if (o->dpmsMode() == Output::DpmsMode::Off) {
+-        const QUuid id = o->uuid();
++        const QString id = earlyIdentifier(o);
+         m_recentlyUnpluggedDpmsOffOutputs.push_back(id);
+         QTimer::singleShot(s_dpmsTimeout, this, [this, id]() {
+             m_recentlyUnpluggedDpmsOffOutputs.removeOne(id);
+--- a/src/backends/drm/drm_backend.h
++++ b/src/backends/drm/drm_backend.h
+@@ -87,7 +87,7 @@
+     std::unique_ptr<QSocketNotifier> m_socketNotifier;
+     Session *m_session;
+     QList<DrmAbstractOutput *> m_outputs;
+-    QList<QUuid> m_recentlyUnpluggedDpmsOffOutputs;
++    QList<QString> m_recentlyUnpluggedDpmsOffOutputs;
+
+     const QStringList m_explicitGpus;
+     std::vector<std::unique_ptr<DrmGpu>> m_gpus;
+-- 
+GitLab
