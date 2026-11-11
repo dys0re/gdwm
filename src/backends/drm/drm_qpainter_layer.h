@@ -9,6 +9,7 @@
 #pragma once
 #include "core/renderbackend.h"
 #include "drm_layer.h"
+#include "scene/lindows_simd_blit.h"
 #include "utils/damagejournal.h"
 
 #include <QImage>
@@ -39,12 +40,16 @@ public:
 
 private:
     bool doesSwapchainFit() const;
+    bool ensureSwapchainAndShadow();
+    uint32_t determineFormat() const;
 
     std::shared_ptr<QPainterSwapchain> m_swapchain;
     std::shared_ptr<QPainterSwapchainSlot> m_currentBuffer;
     std::shared_ptr<DrmFramebuffer> m_currentFramebuffer;
     DamageJournal m_damageJournal;
     std::unique_ptr<CpuRenderTimeQuery> m_renderTime;
+    AlignedShadowBuffer m_shadowBuffer;
+    uint32_t m_selectedDrmFormat = 0;
 };
 
 class DrmVirtualQPainterLayer : public DrmOutputLayer

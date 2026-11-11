@@ -26,22 +26,80 @@ DrmQPainterLayer::DrmQPainterLayer(DrmPipeline *pipeline, DrmPlane::TypeIndex ty
 {
 }
 
-std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
+uint32_t DrmQPainterLayer::determineFormat() const
 {
-    if (!doesSwapchainFit()) {
-        m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), targetRect().size(), m_pipeline->formats(m_type).contains(DRM_FORMAT_ARGB8888) ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888);
-        m_damageJournal = DamageJournal();
+    if (m_selectedDrmFormat != 0) {
+        return m_selectedDrmFormat;
+    }
+    const auto formats = m_pipeline->formats(m_type);
+    if (formats.contains(DRM_FORMAT_ARGB8888)) {
+        return DRM_FORMAT_ARGB8888;
+    }
+    return DRM_FORMAT_XRGB8888;
+}
+
+bool DrmQPainterLayer::doesSwapchainFit() const
+{
+    return m_swapchain && m_swapchain->size() == targetRect().size() && (!m_selectedDrmFormat || m_swapchain->format() == m_selectedDrmFormat);
+}
+
+bool DrmQPainterLayer::ensureSwapchainAndShadow()
+{
+    const QSize size = targetRect().size();
+    if (size.isEmpty()) {
+        return false;
     }
 
-    m_currentBuffer = m_swapchain->acquire();
-    if (!m_currentBuffer) {
+    uint32_t format = determineFormat();
+
+    if (!doesSwapchainFit()) {
+        m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
+        m_damageJournal = DamageJournal();
+        m_currentBuffer = m_swapchain->acquire();
+
+        if (!m_currentBuffer && format == DRM_FORMAT_ARGB8888) {
+            // Gracefully fall back to DRM_FORMAT_XRGB8888 for XR24-only dumb buffer DRM drivers
+            format = DRM_FORMAT_XRGB8888;
+            m_selectedDrmFormat = DRM_FORMAT_XRGB8888;
+            m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
+            m_damageJournal = DamageJournal();
+            m_currentBuffer = m_swapchain->acquire();
+        }
+
+        if (!m_currentBuffer) {
+            return false;
+        }
+
+        m_selectedDrmFormat = format;
+
+        const QImage::Format qFormat = (format == DRM_FORMAT_ARGB8888)
+            ? QImage::Format_ARGB32_Premultiplied
+            : QImage::Format_RGB32;
+
+        if (!m_shadowBuffer.allocate(size, qFormat)) {
+            return false;
+        }
+        m_damageJournal.clear();
+    } else if (!m_currentBuffer) {
+        m_currentBuffer = m_swapchain->acquire();
+        if (!m_currentBuffer) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
+{
+    if (!ensureSwapchainAndShadow()) {
         return std::nullopt;
     }
 
     m_renderTime = std::make_unique<CpuRenderTimeQuery>();
     const QRegion repaint = m_damageJournal.accumulate(m_currentBuffer->age(), infiniteRegion());
     return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_currentBuffer->view()->image()),
+        .renderTarget = RenderTarget(&m_shadowBuffer.image()),
         .repaint = repaint,
     };
 }
@@ -52,9 +110,16 @@ bool DrmQPainterLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &
     if (frame) {
         frame->addRenderTimeQuery(std::move(m_renderTime));
     }
+
+    if (m_currentBuffer && m_currentBuffer->view()) {
+        lindowsBlitDirtyRegion(m_currentBuffer->view()->image(), m_shadowBuffer.image(), renderedRegion);
+    }
+
     m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
     m_damageJournal.add(damagedRegion);
     m_swapchain->release(m_currentBuffer);
+    m_currentBuffer.reset();
+
     if (!m_currentFramebuffer) {
         qCWarning(KWIN_DRM, "Failed to create dumb framebuffer: %s", strerror(errno));
     }
@@ -64,11 +129,25 @@ bool DrmQPainterLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &
 bool DrmQPainterLayer::checkTestBuffer()
 {
     if (!doesSwapchainFit()) {
-        m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), targetRect().size(), m_pipeline->formats(m_type).contains(DRM_FORMAT_ARGB8888) ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888);
-        m_currentBuffer = m_swapchain->acquire();
+        if (!ensureSwapchainAndShadow()) {
+            m_currentFramebuffer.reset();
+            return false;
+        }
         if (m_currentBuffer) {
             m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
-            m_swapchain->release(m_currentBuffer);
+            if (!m_currentFramebuffer && m_selectedDrmFormat == DRM_FORMAT_ARGB8888) {
+                // If dumb framebuffer import failed for ARGB8888, try XRGB8888 fallback
+                m_swapchain.reset();
+                m_currentBuffer.reset();
+                m_selectedDrmFormat = DRM_FORMAT_XRGB8888;
+                if (ensureSwapchainAndShadow() && m_currentBuffer) {
+                    m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
+                }
+            }
+            if (m_currentBuffer) {
+                m_swapchain->release(m_currentBuffer);
+                m_currentBuffer.reset();
+            }
             if (!m_currentFramebuffer) {
                 qCWarning(KWIN_DRM, "Failed to create dumb framebuffer: %s", strerror(errno));
             }
@@ -79,11 +158,6 @@ bool DrmQPainterLayer::checkTestBuffer()
     return m_currentFramebuffer != nullptr;
 }
 
-bool DrmQPainterLayer::doesSwapchainFit() const
-{
-    return m_swapchain && m_swapchain->size() == targetRect().size();
-}
-
 std::shared_ptr<DrmFramebuffer> DrmQPainterLayer::currentBuffer() const
 {
     return m_currentFramebuffer;
@@ -92,6 +166,8 @@ std::shared_ptr<DrmFramebuffer> DrmQPainterLayer::currentBuffer() const
 void DrmQPainterLayer::releaseBuffers()
 {
     m_swapchain.reset();
+    m_currentBuffer.reset();
+    m_shadowBuffer.free();
 }
 
 DrmDevice *DrmQPainterLayer::scanoutDevice() const
