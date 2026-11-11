@@ -15,6 +15,7 @@
 #include <QQmlIncubator>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QTimer>
 
 namespace KWin
 {
@@ -72,6 +73,7 @@ public:
     std::map<Output *, std::unique_ptr<QuickSceneView>> views;
     QPointer<QuickSceneView> mouseImplicitGrab;
     bool running = false;
+    bool retainedViews = false;
 };
 
 bool QuickSceneEffectPrivate::isItemOnScreen(QQuickItem *item, Output *screen) const
@@ -149,7 +151,9 @@ void QuickSceneView::resetDirty()
 void QuickSceneView::scheduleRepaint()
 {
     markDirty();
-    effects->addRepaint(geometry());
+    if (m_effect && m_effect->isRunning() && isVisible()) {
+        effects->addRepaint(geometry());
+    }
 }
 
 QuickSceneView *QuickSceneView::findView(QQuickItem *item)
@@ -177,6 +181,67 @@ QuickSceneEffect::QuickSceneEffect(QObject *parent)
 
 QuickSceneEffect::~QuickSceneEffect()
 {
+    disconnect(effects, &EffectsHandler::screenAdded, this, &QuickSceneEffect::handleScreenAdded);
+    disconnect(effects, &EffectsHandler::screenRemoved, this, &QuickSceneEffect::handleScreenRemoved);
+    d->incubators.clear();
+    d->views.clear();
+    d->contexts.clear();
+}
+
+bool QuickSceneEffect::retainedViews() const
+{
+    return d->retainedViews;
+}
+
+void QuickSceneEffect::setRetainedViews(bool retain)
+{
+    d->retainedViews = retain;
+}
+
+void QuickSceneEffect::schedulePreWarm(int delayMs)
+{
+    d->retainedViews = true;
+    QTimer::singleShot(delayMs, this, [this]() {
+        preWarm();
+    });
+}
+
+void QuickSceneEffect::preWarm()
+{
+    if (d->running || effects->isScreenLocked()) {
+        return;
+    }
+
+    if (!d->delegate) {
+        if (d->source.isEmpty()) {
+            return;
+        }
+        d->delegate = new QQmlComponent(effects->qmlEngine(), this);
+        connect(d->delegate, &QQmlComponent::statusChanged, this, [this]() {
+            if (d->delegate && d->delegate->isReady()) {
+                preWarm();
+            }
+        });
+        d->delegate->loadUrl(d->source, QQmlComponent::Asynchronous);
+        Q_EMIT delegateChanged();
+        return;
+    }
+
+    if (!d->delegate->isReady()) {
+        connect(d->delegate, &QQmlComponent::statusChanged, this, [this]() {
+            if (d->delegate && d->delegate->isReady()) {
+                preWarm();
+            }
+        });
+        return;
+    }
+
+    const QList<Output *> screens = effects->screens();
+    for (Output *screen : screens) {
+        if (d->views.find(screen) == d->views.end() && d->incubators.find(screen) == d->incubators.end()) {
+            addScreen(screen);
+        }
+    }
 }
 
 bool QuickSceneEffect::supported()
@@ -374,12 +439,15 @@ void QuickSceneEffect::activateView(QuickSceneView *view)
 
 void QuickSceneEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime)
 {
+    if (!d->running) {
+        return;
+    }
     data.mask |= PAINT_SCREEN_TRANSFORMED;
     if (!effects->waylandDisplay()) {
         // this has to be done before paintScreen, to avoid changing the OpenGL context
         // which breaks rendering on X11
         for (const auto &[screen, screenView] : d->views) {
-            if (screenView->isDirty()) {
+            if (screenView->isDirty() && screenView->isVisible()) {
                 screenView->resetDirty();
                 screenView->update();
             }
@@ -389,26 +457,33 @@ void QuickSceneEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::mil
 
 void QuickSceneEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen)
 {
+    if (!d->running) {
+        return;
+    }
     if (effects->waylandDisplay()) {
         const auto it = d->views.find(screen);
         if (it != d->views.end()) {
             const auto &screenView = it->second;
-            if (screenView->isDirty()) {
-                screenView->resetDirty();
-                screenView->update();
+            if (screenView->isVisible()) {
+                if (screenView->isDirty()) {
+                    screenView->resetDirty();
+                    screenView->update();
+                }
+                effects->renderOffscreenQuickView(renderTarget, viewport, screenView.get());
             }
-            effects->renderOffscreenQuickView(renderTarget, viewport, screenView.get());
         }
     } else {
         for (const auto &[screen, screenView] : d->views) {
-            effects->renderOffscreenQuickView(renderTarget, viewport, screenView.get());
+            if (screenView->isVisible()) {
+                effects->renderOffscreenQuickView(renderTarget, viewport, screenView.get());
+            }
         }
     }
 }
 
 bool QuickSceneEffect::isActive() const
 {
-    return !d->views.empty() && !effects->isScreenLocked();
+    return d->running && !d->views.empty() && !effects->isScreenLocked();
 }
 
 QVariantMap QuickSceneEffect::initialProperties(Output *screen)
@@ -440,7 +515,19 @@ void QuickSceneEffect::addScreen(Output *screen)
             }
             connect(view.get(), &QuickSceneView::renderRequested, view.get(), &QuickSceneView::scheduleRepaint);
             connect(view.get(), &QuickSceneView::sceneChanged, view.get(), &QuickSceneView::scheduleRepaint);
-            view->scheduleRepaint();
+            if (d->running) {
+                view->setVisible(true);
+                if (view->rootItem()) {
+                    view->rootItem()->setVisible(true);
+                }
+                view->scheduleRepaint();
+                activateView(view.get());
+            } else {
+                view->setVisible(false);
+                if (view->rootItem()) {
+                    view->rootItem()->setVisible(false);
+                }
+            }
             // view is returned via invokables elsewhere
             QJSEngine::setObjectOwnership(view.get(), QJSEngine::CppOwnership);
             d->views[screen] = std::move(view);
@@ -514,29 +601,51 @@ void QuickSceneEffect::startInternal()
 
     const QList<Output *> screens = effects->screens();
     for (Output *screen : screens) {
-        addScreen(screen);
+        auto it = d->views.find(screen);
+        if (it != d->views.end()) {
+            it->second->setVisible(true);
+            if (it->second->rootItem()) {
+                it->second->rootItem()->setVisible(true);
+            }
+            it->second->scheduleRepaint();
+        } else if (d->incubators.find(screen) == d->incubators.end()) {
+            addScreen(screen);
+        }
     }
 
     // Ensure one view has an active focus item
     activateView(activeView());
 
-    connect(effects, &EffectsHandler::screenAdded, this, &QuickSceneEffect::handleScreenAdded);
-    connect(effects, &EffectsHandler::screenRemoved, this, &QuickSceneEffect::handleScreenRemoved);
+    connect(effects, &EffectsHandler::screenAdded, this, &QuickSceneEffect::handleScreenAdded, Qt::UniqueConnection);
+    connect(effects, &EffectsHandler::screenRemoved, this, &QuickSceneEffect::handleScreenRemoved, Qt::UniqueConnection);
 }
 
 void QuickSceneEffect::stopInternal()
 {
-    disconnect(effects, &EffectsHandler::screenAdded, this, &QuickSceneEffect::handleScreenAdded);
-    disconnect(effects, &EffectsHandler::screenRemoved, this, &QuickSceneEffect::handleScreenRemoved);
-
-    d->incubators.clear();
-    d->views.clear();
-    d->contexts.clear();
     d->running = false;
     qApp->removeEventFilter(this);
     effects->ungrabKeyboard();
     effects->stopMouseInterception(this);
     effects->setActiveFullScreenEffect(nullptr);
+
+    if (d->retainedViews) {
+        for (const auto &[screen, view] : d->views) {
+            if (view) {
+                view->setVisible(false);
+                if (view->rootItem()) {
+                    view->rootItem()->setVisible(false);
+                }
+            }
+        }
+    } else {
+        disconnect(effects, &EffectsHandler::screenAdded, this, &QuickSceneEffect::handleScreenAdded);
+        disconnect(effects, &EffectsHandler::screenRemoved, this, &QuickSceneEffect::handleScreenRemoved);
+
+        d->incubators.clear();
+        d->views.clear();
+        d->contexts.clear();
+    }
+
     effects->addRepaintFull();
 }
 

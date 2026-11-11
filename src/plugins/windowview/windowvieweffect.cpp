@@ -43,6 +43,8 @@ WindowViewEffect::WindowViewEffect()
     connect(effects, &EffectsHandler::screenAboutToLock, this, &WindowViewEffect::realDeactivate);
 
     setSource(QUrl::fromLocalFile(QStandardPaths::locate(QStandardPaths::GenericDataLocation, QStringLiteral("kwin/effects/windowview/qml/main.qml"))));
+    setRetainedViews(true);
+    schedulePreWarm(150);
 
     m_exposeAction->setObjectName(QStringLiteral("Expose"));
     m_exposeAction->setText(i18n("Toggle Present Windows (Current desktop)"));

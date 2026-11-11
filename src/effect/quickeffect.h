@@ -92,6 +92,18 @@ public:
      */
     void setRunning(bool running);
 
+    /**
+     * Whether QuickSceneView instances should be retained across open/close cycles.
+     */
+    bool retainedViews() const;
+    void setRetainedViews(bool retain);
+
+    /**
+     * Pre-warms the QML delegate component and views asynchronously.
+     */
+    void schedulePreWarm(int delayMs = 150);
+    void preWarm();
+
     QuickSceneView *activeView() const;
 
     /**

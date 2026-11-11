@@ -25,12 +25,6 @@ namespace KWin
 
 void gainRealTime(int targetPriority)
 {
-    // Try to lock memory pages to avoid page faults on critical realtime threads.
-    struct rlimit rlimMem;
-    if (getrlimit(RLIMIT_MEMLOCK, &rlimMem) == 0 && rlimMem.rlim_cur != 0) {
-        mlockall(MCL_CURRENT);
-    }
-
     int maxPrio = sched_get_priority_max(SCHED_FIFO);
     int minPrio = sched_get_priority_min(SCHED_FIFO);
     if (maxPrio < 0 || minPrio < 0) {

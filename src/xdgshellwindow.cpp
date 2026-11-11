@@ -108,12 +108,18 @@ XdgSurfaceConfigure *XdgSurfaceWindow::lastAcknowledgedConfigure() const
 void XdgSurfaceWindow::scheduleConfigure()
 {
     if (!isDeleted()) {
+        if (isInteractiveMove()) {
+            return;
+        }
         m_configureTimer->start();
     }
 }
 
 void XdgSurfaceWindow::sendConfigure()
 {
+    if (isInteractiveMove()) {
+        return;
+    }
     XdgSurfaceConfigure *configureEvent = sendRoleConfigure();
 
     // The configure event inherits configure flags from the previous event.
@@ -1220,6 +1226,9 @@ void XdgToplevelWindow::handleMinimumSizeChanged()
 
 void XdgToplevelWindow::sendPing(PingReason reason)
 {
+    if (unresponsive() || !m_pings.isEmpty()) {
+        return;
+    }
     XdgShellInterface *shell = m_shellSurface->shell();
     XdgSurfaceInterface *surface = m_shellSurface->xdgSurface();
 

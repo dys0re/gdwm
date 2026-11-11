@@ -166,6 +166,8 @@ OverviewEffect::OverviewEffect()
     });
     delegate->loadUrl(QUrl(QStringLiteral("qrc:/overview/qml/main.qml")), QQmlComponent::Asynchronous);
     setDelegate(delegate);
+    setRetainedViews(true);
+    schedulePreWarm(150);
 }
 
 OverviewEffect::~OverviewEffect()
