@@ -75,7 +75,7 @@ DrmCommitThread::DrmCommitThread(DrmGpu *gpu, const QString &name)
                 continue;
             }
             const auto now = std::chrono::steady_clock::now();
-            if (m_targetPageflipTime > now + m_safetyMargin) {
+            if (!m_gpu->isVirtualMachine() && m_targetPageflipTime > now + m_safetyMargin) {
                 lock.unlock();
                 std::this_thread::sleep_until(m_targetPageflipTime - m_safetyMargin);
                 lock.lock();
@@ -152,22 +152,27 @@ void DrmCommitThread::submit()
         // after we return from the commit ioctl, but we don't have any better
         // way to know when it's done
         m_lastCommitTime = std::chrono::steady_clock::now();
-        // this is when we wanted to have completed the commit
-        const auto targetTimestamp = m_targetPageflipTime - m_baseSafetyMargin;
-        // this is how much safety we need to add or remove to achieve that next time
-        const auto safetyDifference = targetTimestamp - m_lastCommitTime;
-        if (safetyDifference < std::chrono::nanoseconds::zero()) {
-            // the commit was done later than desired, immediately add the
-            // required difference to make sure that it doesn't happen again
-            m_additionalSafetyMargin -= safetyDifference;
+        if (m_gpu->isVirtualMachine()) {
+            m_additionalSafetyMargin = 0ns;
+            m_safetyMargin = 0ns;
         } else {
-            // we were done earlier than desired. This isn't problematic, but
-            // we want to keep latency at a minimum, so slowly reduce the safety margin
-            m_additionalSafetyMargin -= safetyDifference / 10;
+            // this is when we wanted to have completed the commit
+            const auto targetTimestamp = m_targetPageflipTime - m_baseSafetyMargin;
+            // this is how much safety we need to add or remove to achieve that next time
+            const auto safetyDifference = targetTimestamp - m_lastCommitTime;
+            if (safetyDifference < std::chrono::nanoseconds::zero()) {
+                // the commit was done later than desired, immediately add the
+                // required difference to make sure that it doesn't happen again
+                m_additionalSafetyMargin -= safetyDifference;
+            } else {
+                // we were done earlier than desired. This isn't problematic, but
+                // we want to keep latency at a minimum, so slowly reduce the safety margin
+                m_additionalSafetyMargin -= safetyDifference / 10;
+            }
+            const auto maximumReasonableMargin = std::min<std::chrono::nanoseconds>(3ms, m_minVblankInterval / 2);
+            m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
+            m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
         }
-        const auto maximumReasonableMargin = std::min<std::chrono::nanoseconds>(3ms, m_minVblankInterval / 2);
-        m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
-        m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
     } else {
         if (m_commits.size() > 1) {
             // the failure may have been because of the reordering of commits
@@ -334,6 +339,12 @@ void DrmCommitThread::addCommit(std::unique_ptr<DrmAtomicCommit> &&commit)
     std::unique_lock lock(m_mutex);
     m_commits.push_back(std::move(commit));
     const auto now = std::chrono::steady_clock::now();
+    if (m_gpu->isVirtualMachine()) {
+        m_targetPageflipTime = now;
+        m_commits.back()->setDeadline(now);
+        m_commitPending.notify_all();
+        return;
+    }
     TimePoint newTarget;
     if (m_tearing) {
         newTarget = now;
@@ -374,6 +385,12 @@ void DrmCommitThread::setModeInfo(uint32_t maximum, std::chrono::nanoseconds vbl
 {
     std::unique_lock lock(m_mutex);
     m_minVblankInterval = std::chrono::nanoseconds(1'000'000'000'000ull / maximum);
+    if (m_gpu->isVirtualMachine()) {
+        m_baseSafetyMargin = 0ns;
+        m_additionalSafetyMargin = 0ns;
+        m_safetyMargin = 0ns;
+        return;
+    }
     // the kernel rejects commits that happen during vblank
     // the 1.5ms on top of that was chosen experimentally, for the time it takes to commit + scheduling inaccuracies
     m_baseSafetyMargin = vblankTime + s_safetyMarginMinimum;
@@ -390,7 +407,8 @@ void DrmCommitThread::pageFlipped(std::chrono::nanoseconds timestamp)
     m_lastPageflip = TimePoint(timestamp);
     m_committed.reset();
     if (!m_commits.empty()) {
-        m_targetPageflipTime = estimateNextVblank(std::chrono::steady_clock::now());
+        const auto now = std::chrono::steady_clock::now();
+        m_targetPageflipTime = m_gpu->isVirtualMachine() ? now : estimateNextVblank(now);
         m_commitPending.notify_all();
     }
 }

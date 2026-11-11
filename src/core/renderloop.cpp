@@ -60,6 +60,24 @@ void RenderLoopPrivate::scheduleRepaint(std::chrono::nanoseconds lastTargetTimes
     const std::chrono::nanoseconds vblankInterval(1'000'000'000'000ull / refreshRate);
     const std::chrono::nanoseconds currentTime(std::chrono::steady_clock::now().time_since_epoch());
 
+    // Virtual DRM drivers (virtio-gpu, qxl, vmwgfx, vboxvideo) have no hardware scanout vblank
+    // and report safetyMargin == 0ns. Use single-stage post-present pacing without triple-buffer
+    // hysteresis, clamping timer wait <= 14ms at >= 59Hz so 64Hz hypervisor ticks (15.625ms)
+    // never round up to 2 ticks (31.25ms).
+    if (safetyMargin == std::chrono::nanoseconds::zero() && presentationMode == PresentationMode::VSync) {
+        wasTripleBuffering = false;
+        doubleBufferingCounter = 0;
+        const std::chrono::nanoseconds predictedRender = std::min(renderJournal.result(), vblankInterval);
+        const std::chrono::nanoseconds elapsed = std::max(std::chrono::nanoseconds::zero(), currentTime - lastPresentationTimestamp);
+        nextPresentationTimestamp = std::max(currentTime + predictedRender, lastPresentationTimestamp + vblankInterval);
+        auto waitMs = std::max(0ms, std::chrono::duration_cast<std::chrono::milliseconds>(vblankInterval - elapsed - predictedRender));
+        if (vblankInterval <= 17ms && waitMs > 14ms) {
+            waitMs = 14ms;
+        }
+        compositeTimer.start(waitMs);
+        return;
+    }
+
     // Estimate when it's a good time to perform the next compositing cycle.
     // the 1ms on top of the safety margin is required for timer and scheduler inaccuracies
     std::chrono::nanoseconds expectedCompositingTime = std::min(renderJournal.result() + safetyMargin + 1ms, 2 * vblankInterval);

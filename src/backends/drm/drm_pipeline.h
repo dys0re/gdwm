@@ -14,6 +14,7 @@
 #include <QRect>
 #include <QSize>
 
+#include <array>
 #include <chrono>
 #include <optional>
 #include <xf86drmMode.h>
@@ -211,11 +212,18 @@ private:
     };
 
     AtomicTestSignature currentTestSignature(CommitMode mode = CommitMode::Test) const;
+    std::optional<Error> lookupTestCache(const AtomicTestSignature &sig) const;
+    void recordTestCache(const AtomicTestSignature &sig, Error err);
     void invalidateTestCache();
 
-    std::optional<AtomicTestSignature> m_lastValidatedSignature;
-    bool m_lastTestPassed = false;
-    std::optional<Error> m_lastTestError;
+    struct CachedAtomicTest
+    {
+        bool valid = false;
+        AtomicTestSignature sig;
+        Error err = Error::None;
+    };
+    std::array<CachedAtomicTest, 4> m_testCache{};
+    size_t m_testCacheCursor = 0;
 };
 
 }
