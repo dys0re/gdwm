@@ -12,6 +12,9 @@
 #include "core/colorspace.h"
 #include "scene/scene.h"
 
+#include <QHash>
+#include <QRect>
+
 namespace KWin
 {
 
@@ -32,6 +35,7 @@ class Shadow;
 class ShadowItem;
 class ShadowTextureProvider;
 class SurfaceItem;
+class Window;
 class WindowItem;
 class WindowPaintData;
 class OpenGlContext;
@@ -90,7 +94,7 @@ protected:
     // shared implementation of painting the screen in the generic
     // (unoptimized) way
     void preparePaintGenericScreen();
-    void paintGenericScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, Output *screen);
+    void paintGenericScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen);
     // shared implementation of painting the screen in an optimized way
     void preparePaintSimpleScreen();
     void paintSimpleScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region);
@@ -135,6 +139,7 @@ private:
     std::unique_ptr<Item> m_containerItem;
     std::unique_ptr<Item> m_overlayItem;
     std::unique_ptr<DragAndDropIconItem> m_dndIcon;
+    QHash<const Window *, QRect> m_prevTransformedBounds;
 };
 
 } // namespace

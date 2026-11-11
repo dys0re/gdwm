@@ -358,26 +358,117 @@ static void accumulateRepaints(Item *item, SceneDelegate *delegate, QRegion *rep
     }
 }
 
+static QRegion effectiveWindowOpaqueRegion(const Window *window, const WindowItem *windowItem)
+{
+    if (!window || window->opacity() < 0.999) {
+        return QRegion();
+    }
+
+    QRegion opaque;
+    const SurfaceItem *surfaceItem = windowItem ? windowItem->surfaceItem() : nullptr;
+    if (surfaceItem && surfaceItem->pixmap() && surfaceItem->pixmap()->isValid()) {
+        bool hasAlpha = true;
+#if KWIN_BUILD_X11
+        if (const auto *x11 = qobject_cast<const X11Window *>(window)) {
+            hasAlpha = x11->hasAlpha();
+        }
+#endif
+        if (window->isDesktop() || !surfaceItem->pixmap()->hasAlphaChannel() || !hasAlpha) {
+            opaque = surfaceItem->mapToScene(QRectF(QPointF(0, 0), surfaceItem->destinationSize())).toAlignedRect();
+        } else {
+            opaque = surfaceItem->mapToScene(surfaceItem->opaque());
+        }
+    }
+
+    if (windowItem) {
+        if (const DecorationItem *decorationItem = windowItem->decorationItem()) {
+            opaque += decorationItem->mapToScene(decorationItem->opaque());
+        }
+    }
+
+    return opaque;
+}
+
 void WorkspaceScene::preparePaintGenericScreen()
 {
-    for (WindowItem *windowItem : std::as_const(stacking_order)) {
-        resetRepaintsHelper(windowItem, painted_delegate);
+    if (m_paintContext.mask & PAINT_SCREEN_TRANSFORMED) {
+        const QRegion screenRegion = painted_screen ? QRegion(painted_screen->geometry()) : infiniteRegion();
+        m_paintContext.damage = screenRegion;
 
+        for (WindowItem *windowItem : std::as_const(stacking_order)) {
+            resetRepaintsHelper(windowItem, painted_delegate);
+
+            WindowPrePaintData data;
+            data.mask = m_paintContext.mask;
+            data.paint = screenRegion;
+
+            effects->prePaintWindow(windowItem->effectWindow(), data, m_expectedPresentTimestamp);
+            m_paintContext.phase2Data.append(Phase2Data{
+                .item = windowItem,
+                .region = screenRegion,
+                .opaque = data.opaque,
+                .mask = data.mask,
+            });
+        }
+
+        resetRepaintsHelper(m_overlayItem.get(), painted_delegate);
+        m_prevTransformedBounds.clear();
+        return;
+    }
+
+    const QRect screenGeometry = painted_screen ? painted_screen->geometry() : workspace()->geometry();
+    QHash<const Window *, QRect> newTransformedBounds;
+
+    for (WindowItem *windowItem : std::as_const(stacking_order)) {
+        Window *window = windowItem->window();
         WindowPrePaintData data;
         data.mask = m_paintContext.mask;
-        data.paint = infiniteRegion(); // no clipping, so doesn't really matter
+        accumulateRepaints(windowItem, painted_delegate, &data.paint);
+        data.opaque = effectiveWindowOpaqueRegion(window, windowItem);
 
         effects->prePaintWindow(windowItem->effectWindow(), data, m_expectedPresentTimestamp);
+
+        if (data.mask & PAINT_WINDOW_TRANSFORMED) {
+            QRect currentBounds = windowItem->mapToScene(windowItem->boundingRect()).toAlignedRect();
+            if (painted_screen) {
+                currentBounds &= screenGeometry;
+            }
+            data.paint |= currentBounds;
+
+            const auto it = m_prevTransformedBounds.find(window);
+            if (it != m_prevTransformedBounds.end()) {
+                data.paint |= it.value();
+            }
+            newTransformedBounds.insert(window, currentBounds);
+        }
+
         m_paintContext.phase2Data.append(Phase2Data{
             .item = windowItem,
-            .region = infiniteRegion(),
+            .region = data.paint,
             .opaque = data.opaque,
             .mask = data.mask,
         });
     }
 
-    resetRepaintsHelper(m_overlayItem.get(), painted_delegate);
-    m_paintContext.damage = infiniteRegion();
+    // Damage previous bounds for windows that stopped being transformed or were removed
+    for (auto it = m_prevTransformedBounds.constBegin(); it != m_prevTransformedBounds.constEnd(); ++it) {
+        if (!newTransformedBounds.contains(it.key())) {
+            m_paintContext.damage |= it.value();
+        }
+    }
+    m_prevTransformedBounds = std::move(newTransformedBounds);
+
+    // Occlusion cull pass: remove surface damage occluded by opaque windows.
+    QRegion opaque;
+    for (int i = m_paintContext.phase2Data.size() - 1; i >= 0; --i) {
+        const auto &paintData = m_paintContext.phase2Data.at(i);
+        m_paintContext.damage += paintData.region - opaque;
+        if (!(paintData.mask & (PAINT_WINDOW_TRANSLUCENT | PAINT_WINDOW_TRANSFORMED))) {
+            opaque += paintData.opaque;
+        }
+    }
+
+    accumulateRepaints(m_overlayItem.get(), painted_delegate, &m_paintContext.damage);
 }
 
 void WorkspaceScene::preparePaintSimpleScreen()
@@ -389,17 +480,7 @@ void WorkspaceScene::preparePaintSimpleScreen()
         accumulateRepaints(windowItem, painted_delegate, &data.paint);
 
         // Clip out the decoration for opaque windows; the decoration is drawn in the second pass.
-        if (window->opacity() == 1.0) {
-            const SurfaceItem *surfaceItem = windowItem->surfaceItem();
-            if (Q_LIKELY(surfaceItem)) {
-                data.opaque = surfaceItem->mapToScene(surfaceItem->opaque());
-            }
-
-            const DecorationItem *decorationItem = windowItem->decorationItem();
-            if (decorationItem) {
-                data.opaque += decorationItem->mapToScene(decorationItem->opaque());
-            }
-        }
+        data.opaque = effectiveWindowOpaqueRegion(window, windowItem);
 
         effects->prePaintWindow(windowItem->effectWindow(), data, m_expectedPresentTimestamp);
         m_paintContext.phase2Data.append(Phase2Data{
@@ -408,6 +489,13 @@ void WorkspaceScene::preparePaintSimpleScreen()
             .opaque = data.opaque,
             .mask = data.mask,
         });
+    }
+
+    if (!m_prevTransformedBounds.isEmpty()) {
+        for (const QRect &r : std::as_const(m_prevTransformedBounds)) {
+            m_paintContext.damage |= r;
+        }
+        m_prevTransformedBounds.clear();
     }
 
     // Perform an occlusion cull pass, remove surface damage occluded by opaque windows.
@@ -460,7 +548,7 @@ void WorkspaceScene::finalPaintScreen(const RenderTarget &renderTarget, const Re
 {
     m_paintScreenCount++;
     if (mask & (PAINT_SCREEN_TRANSFORMED | PAINT_SCREEN_WITH_TRANSFORMED_WINDOWS)) {
-        paintGenericScreen(renderTarget, viewport, mask, screen);
+        paintGenericScreen(renderTarget, viewport, mask, region, screen);
     } else {
         paintSimpleScreen(renderTarget, viewport, mask, region);
     }
@@ -468,14 +556,44 @@ void WorkspaceScene::finalPaintScreen(const RenderTarget &renderTarget, const Re
 
 // The generic painting code that can handle even transformations.
 // It simply paints bottom-to-top.
-void WorkspaceScene::paintGenericScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int, Output *screen)
+void WorkspaceScene::paintGenericScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen)
 {
-    if (m_paintContext.mask & PAINT_SCREEN_BACKGROUND_FIRST) {
+    if (mask & PAINT_SCREEN_TRANSFORMED) {
+        const QRegion screenRegion = region.isEmpty() ? (screen ? QRegion(screen->geometry()) : infiniteRegion()) : region;
+        if (mask & PAINT_SCREEN_BACKGROUND_FIRST) {
+            if (m_paintScreenCount == 1) {
+                m_renderer->renderBackground(renderTarget, viewport, screenRegion);
+            }
+        } else {
+            m_renderer->renderBackground(renderTarget, viewport, screenRegion);
+        }
+
+        for (const Phase2Data &paintData : std::as_const(m_paintContext.phase2Data)) {
+            paintWindow(renderTarget, viewport, paintData.item, paintData.mask, paintData.region);
+        }
+        return;
+    }
+
+    QRegion visible = region;
+    for (int i = m_paintContext.phase2Data.size() - 1; i >= 0; --i) {
+        Phase2Data *data = &m_paintContext.phase2Data[i];
+        data->region = visible;
+
+        if (!(data->mask & PAINT_WINDOW_TRANSFORMED)) {
+            data->region &= data->item->mapToScene(data->item->boundingRect()).toAlignedRect();
+
+            if (!(data->mask & PAINT_WINDOW_TRANSLUCENT)) {
+                visible -= data->opaque;
+            }
+        }
+    }
+
+    if (mask & PAINT_SCREEN_BACKGROUND_FIRST) {
         if (m_paintScreenCount == 1) {
-            m_renderer->renderBackground(renderTarget, viewport, infiniteRegion());
+            m_renderer->renderBackground(renderTarget, viewport, visible);
         }
     } else {
-        m_renderer->renderBackground(renderTarget, viewport, infiniteRegion());
+        m_renderer->renderBackground(renderTarget, viewport, visible);
     }
 
     for (const Phase2Data &paintData : std::as_const(m_paintContext.phase2Data)) {
