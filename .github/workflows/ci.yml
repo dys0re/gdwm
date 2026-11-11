@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warp-simd-test:
+    name: WARP SIMD Rasterizer Check (Debian 13)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install bootstrap & Qt6Gui deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git g++ pkgconf qt6-base-dev
+          git config --global --add safe.directory '*'
+
+      - name: Checkout gdwm
+        uses: actions/checkout@v4
+
+      - name: Compile & run WARP SIMD pixel-exactness suite
+        run: |
+          g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+            $(pkgconf --cflags Qt6Gui) \
+            -Isrc/scene \
+            -x c++ - -o /tmp/warp_simd_test $(pkgconf --libs Qt6Gui) << 'EOF'
+          #include "lindows_simd_blit.h"
+          #include <cassert>
+          #include <cstdio>
+
+          int main() {
+              using namespace KWin;
+
+              AlignedShadowBuffer buf;
+              assert(buf.allocate(QSize(127, 33), QImage::Format_ARGB32_Premultiplied));
+              assert((reinterpret_cast<uintptr_t>(buf.data()) % 64) == 0);
+              assert((buf.stride() % 64) == 0);
+
+              uint32_t srcRgb[19], dstRgb[19];
+              for (int i = 0; i < 19; ++i) {
+                  srcRgb[i] = 0x00112233u + static_cast<uint32_t>(i);
+                  dstRgb[i] = 0u;
+              }
+              lindowsCopyRowOpaque32(reinterpret_cast<uint8_t *>(dstRgb),
+                                     reinterpret_cast<const uint8_t *>(srcRgb), 19);
+              for (int i = 0; i < 19; ++i) {
+                  assert(dstRgb[i] == (srcRgb[i] | 0xFF000000u));
+              }
+
+          #if defined(__SSE2__)
+              const uint32_t premulSamples[4] = {0x00000000u, 0x40201008u, 0x80402010u, 0xFF123456u};
+              const uint32_t xrgbSamples[4]   = {0x00000000u, 0x00FFFFFFu, 0x004080C0u, 0xFF123456u};
+              for (bool srcIsRGB32 : {false, true}) {
+                  const uint32_t *samples = srcIsRGB32 ? xrgbSamples : premulSamples;
+                  for (bool dstIsRGB32 : {false, true}) {
+                      for (int op : {64, 128, 255, 256}) {
+                          uint32_t dVec[4] = {
+                              0xFF304050u,
+                              dstIsRGB32 ? 0xFF102030u : 0x80102030u,
+                              dstIsRGB32 ? 0xFF000000u : 0x00000000u,
+                              0xFFAABBCCu
+                          };
+                          uint32_t dRef[4] = {dVec[0], dVec[1], dVec[2], dVec[3]};
+                          __m128i vsrc = _mm_loadu_si128(reinterpret_cast<const __m128i *>(samples));
+                          lindowsBlend4PixelsSSE2(dVec, vsrc, op, srcIsRGB32, dstIsRGB32);
+                          for (int k = 0; k < 4; ++k) {
+                              dRef[k] = blendPixelPremulScalar(samples[k], dRef[k], op, srcIsRGB32, dstIsRGB32);
+                              assert(dVec[k] == dRef[k]);
+                          }
+                      }
+                  }
+              }
+          #endif
+
+              QImage dst(64, 64, QImage::Format_RGB32);
+              dst.fill(0xFF000000u);
+              QImage src(32, 32, QImage::Format_RGB32);
+              src.fill(0x00224466u);
+              assert(lindowsBlendOrScaleBlitSimd(&dst, QRectF(4, 4, 32, 32), src, QRectF(-4, -4, 32, 32), QRegion(0, 0, 64, 64), 128, false));
+              assert(lindowsBlendOrScaleBlitSimd(&dst, QRectF(0, 0, 48, 48), src, QRectF(0, 0, 32, 32), QRegion(0, 0, 64, 64), 256, true));
+              assert((reinterpret_cast<const uint32_t *>(dst.constScanLine(10))[10]) == 0xFF224466u);
+
+              std::puts("[OK] WARP SIMD rasterizer checks passed.");
+              return 0;
+          }
+          EOF
+          /tmp/warp_simd_test
+
+  build-debian-trixie:
+    name: Build Compositor (Debian 13 trixie)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Install bootstrap tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git ninja-build mold ccache
+          git config --global --add safe.directory '*'
+
+      - name: Checkout gdwm
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: gdwm-trixie-ccache-${{ github.sha }}
+          restore-keys: |
+            gdwm-trixie-ccache-
+
+      - name: Install Debian 13 KWin build-dependencies
+        run: |
+          apt-get build-dep -y --no-install-recommends ./
+
+      - name: Configure & Build gdwm
+        run: |
+          ccache --zero-stats
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O2 -g1 -DNDEBUG" \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g1 -DNDEBUG" \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=mold" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=mold" \
+            -DCMAKE_MODULE_LINKER_FLAGS="-fuse-ld=mold" \
+            -DBUILD_TESTING=OFF
+          ninja -C build -j"$(nproc)"
+          ccache --show-stats
+
+      - name: Verify staged installation
+        run: |
+          DESTDIR="$PWD/stage" ninja -C build install
+          test -x "$PWD/stage/usr/bin/kwin_wayland"
+          ls -lh "$PWD/stage/usr/bin/kwin_wayland" "$PWD/stage/usr/lib/"*/libkwin.so.6*
