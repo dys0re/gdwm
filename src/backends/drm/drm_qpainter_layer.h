@@ -40,7 +40,6 @@ public:
 
 private:
     bool doesSwapchainFit() const;
-    bool ensureSwapchainAndShadow();
     uint32_t determineFormat() const;
 
     std::shared_ptr<QPainterSwapchain> m_swapchain;

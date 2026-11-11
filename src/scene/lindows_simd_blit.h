@@ -220,61 +220,12 @@ inline void lindowsBlitDirtyRegion(uint8_t *dstBytes, int dstStride,
         return;
     }
 
-    std::vector<QRect> rects;
-    rects.reserve(dirtyRegion.rectCount());
     for (const QRect &r : dirtyRegion) {
-        const QRect cr = r.intersected(bounds);
-        if (!cr.isEmpty()) {
-            rects.push_back(cr);
+        const QRect rect = r.intersected(bounds);
+        if (rect.isEmpty()) {
+            continue;
         }
-    }
 
-    if (rects.empty()) {
-        return;
-    }
-
-    // Coalesce adjacent/touching rectangles to minimize draw operations and maximize burst width
-    if (rects.size() > 1) {
-        bool merged = true;
-        while (merged) {
-            merged = false;
-            for (size_t i = 0; i < rects.size(); ++i) {
-                for (size_t j = i + 1; j < rects.size(); ++j) {
-                    QRect &a = rects[i];
-                    QRect &b = rects[j];
-                    // Horizontal merge if same top and height and adjacent/overlapping
-                    if (a.top() == b.top() && a.height() == b.height()) {
-                        if (a.right() + 1 >= b.left() && b.right() + 1 >= a.left()) {
-                            const int l = std::min(a.left(), b.left());
-                            const int r = std::max(a.right(), b.right());
-                            a.setLeft(l);
-                            a.setWidth(r - l + 1);
-                            rects.erase(rects.begin() + j);
-                            merged = true;
-                            break;
-                        }
-                    }
-                    // Vertical merge if same left and width and adjacent/overlapping
-                    if (a.left() == b.left() && a.width() == b.width()) {
-                        if (a.bottom() + 1 >= b.top() && b.bottom() + 1 >= a.top()) {
-                            const int t = std::min(a.top(), b.top());
-                            const int bot = std::max(a.bottom(), b.bottom());
-                            a.setTop(t);
-                            a.setHeight(bot - t + 1);
-                            rects.erase(rects.begin() + j);
-                            merged = true;
-                            break;
-                        }
-                    }
-                }
-                if (merged) {
-                    break;
-                }
-            }
-        }
-    }
-
-    for (const QRect &rect : rects) {
         const int rx = rect.x();
         const int ry = rect.y();
         const int rw = rect.width();

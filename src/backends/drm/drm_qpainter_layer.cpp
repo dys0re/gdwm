@@ -43,22 +43,20 @@ bool DrmQPainterLayer::doesSwapchainFit() const
     return m_swapchain && m_swapchain->size() == targetRect().size() && (!m_selectedDrmFormat || m_swapchain->format() == m_selectedDrmFormat);
 }
 
-bool DrmQPainterLayer::ensureSwapchainAndShadow()
+std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
 {
     const QSize size = targetRect().size();
     if (size.isEmpty()) {
-        return false;
+        return std::nullopt;
     }
 
-    uint32_t format = determineFormat();
-
     if (!doesSwapchainFit()) {
+        uint32_t format = determineFormat();
         m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
         m_damageJournal = DamageJournal();
         m_currentBuffer = m_swapchain->acquire();
 
         if (!m_currentBuffer && format == DRM_FORMAT_ARGB8888) {
-            // Gracefully fall back to DRM_FORMAT_XRGB8888 for XR24-only dumb buffer DRM drivers
             format = DRM_FORMAT_XRGB8888;
             m_selectedDrmFormat = DRM_FORMAT_XRGB8888;
             m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
@@ -67,7 +65,7 @@ bool DrmQPainterLayer::ensureSwapchainAndShadow()
         }
 
         if (!m_currentBuffer) {
-            return false;
+            return std::nullopt;
         }
 
         m_selectedDrmFormat = format;
@@ -77,23 +75,14 @@ bool DrmQPainterLayer::ensureSwapchainAndShadow()
             : QImage::Format_RGB32;
 
         if (!m_shadowBuffer.allocate(size, qFormat)) {
-            return false;
+            return std::nullopt;
         }
         m_damageJournal.clear();
-    } else if (!m_currentBuffer) {
+    } else {
         m_currentBuffer = m_swapchain->acquire();
         if (!m_currentBuffer) {
-            return false;
+            return std::nullopt;
         }
-    }
-
-    return true;
-}
-
-std::optional<OutputLayerBeginFrameInfo> DrmQPainterLayer::doBeginFrame()
-{
-    if (!ensureSwapchainAndShadow()) {
-        return std::nullopt;
     }
 
     m_renderTime = std::make_unique<CpuRenderTimeQuery>();
@@ -118,7 +107,6 @@ bool DrmQPainterLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &
     m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
     m_damageJournal.add(damagedRegion);
     m_swapchain->release(m_currentBuffer);
-    m_currentBuffer.reset();
 
     if (!m_currentFramebuffer) {
         qCWarning(KWIN_DRM, "Failed to create dumb framebuffer: %s", strerror(errno));
@@ -129,25 +117,20 @@ bool DrmQPainterLayer::doEndFrame(const QRegion &renderedRegion, const QRegion &
 bool DrmQPainterLayer::checkTestBuffer()
 {
     if (!doesSwapchainFit()) {
-        if (!ensureSwapchainAndShadow()) {
-            m_currentFramebuffer.reset();
-            return false;
+        const QSize size = targetRect().size();
+        uint32_t format = determineFormat();
+        m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
+        m_currentBuffer = m_swapchain->acquire();
+        if (!m_currentBuffer && format == DRM_FORMAT_ARGB8888) {
+            format = DRM_FORMAT_XRGB8888;
+            m_selectedDrmFormat = DRM_FORMAT_XRGB8888;
+            m_swapchain = std::make_shared<QPainterSwapchain>(m_pipeline->gpu()->drmDevice()->allocator(), size, format);
+            m_currentBuffer = m_swapchain->acquire();
         }
         if (m_currentBuffer) {
+            m_selectedDrmFormat = format;
             m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
-            if (!m_currentFramebuffer && m_selectedDrmFormat == DRM_FORMAT_ARGB8888) {
-                // If dumb framebuffer import failed for ARGB8888, try XRGB8888 fallback
-                m_swapchain.reset();
-                m_currentBuffer.reset();
-                m_selectedDrmFormat = DRM_FORMAT_XRGB8888;
-                if (ensureSwapchainAndShadow() && m_currentBuffer) {
-                    m_currentFramebuffer = m_pipeline->gpu()->importBuffer(m_currentBuffer->buffer(), FileDescriptor{});
-                }
-            }
-            if (m_currentBuffer) {
-                m_swapchain->release(m_currentBuffer);
-                m_currentBuffer.reset();
-            }
+            m_swapchain->release(m_currentBuffer);
             if (!m_currentFramebuffer) {
                 qCWarning(KWIN_DRM, "Failed to create dumb framebuffer: %s", strerror(errno));
             }

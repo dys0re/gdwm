@@ -8,6 +8,9 @@
 
 #include "scene/itemrenderer.h"
 
+#include <QHash>
+#include <QRegion>
+
 class QPainter;
 
 namespace KWin
@@ -39,6 +42,8 @@ private:
     void renderItem(QPainter *painter, Item *item) const;
 
     std::unique_ptr<QPainter> m_painter;
+    QRegion m_backgroundOcclusion;
+    QHash<const Item *, QRegion> m_occludedByAbove;
 };
 
 } // namespace KWin
