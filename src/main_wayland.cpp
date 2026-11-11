@@ -255,7 +255,7 @@ int main(int argc, char *argv[])
 {
     KWin::Application::setupMalloc();
     KWin::Application::setupLocalizedString();
-    KWin::gainRealTime();
+    KWin::gainRealTime(50);
 
     signal(SIGPIPE, SIG_IGN);
 

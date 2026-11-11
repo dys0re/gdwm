@@ -7,6 +7,7 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "gestures.h"
+#include "utils/realtime.h"
 
 #include <QDebug>
 #include <QRect>
@@ -132,6 +133,7 @@ void GestureRecognizer::unregisterPinchGesture(KWin::PinchGesture *gesture)
 
 int GestureRecognizer::startSwipeGesture(uint fingerCount, const QPointF &startPos, StartPositionBehavior startPosBehavior)
 {
+    triggerInputBoost();
     m_currentFingerCount = fingerCount;
     if (!m_activeSwipeGestures.isEmpty() || !m_activePinchGestures.isEmpty()) {
         return 0;
@@ -304,6 +306,7 @@ void GestureRecognizer::endSwipeGesture()
 
 int GestureRecognizer::startPinchGesture(uint fingerCount)
 {
+    triggerInputBoost();
     m_currentFingerCount = fingerCount;
     int count = 0;
     if (!m_activeSwipeGestures.isEmpty() || !m_activePinchGestures.isEmpty()) {

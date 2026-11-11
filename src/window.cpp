@@ -10,6 +10,7 @@
 #include "window.h"
 #include "effect/globals.h"
 #include "utils/common.h"
+#include "utils/realtime.h"
 
 #if KWIN_BUILD_ACTIVITIES
 #include "activities.h"
@@ -1148,6 +1149,7 @@ void Window::setMaximize(bool vertically, bool horizontally, const QRectF &resto
 
 bool Window::startInteractiveMoveResize()
 {
+    triggerInputBoost();
     if (isDeleted()) {
         return false;
     }

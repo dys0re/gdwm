@@ -9,6 +9,7 @@
     SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "input.h"
+#include "utils/realtime.h"
 
 #include "backends/fakeinput/fakeinputbackend.h"
 #include "core/inputbackend.h"
@@ -996,6 +997,7 @@ public:
     bool pointerButton(PointerButtonEvent *event) override
     {
         if (event->state == PointerButtonState::Pressed) {
+            triggerInputBoost();
             if (input()->shortcuts()->processPointerPressed(event->modifiers, event->buttons)) {
                 return true;
             }
@@ -1043,6 +1045,7 @@ public:
         } else if (event->state == KeyboardKeyState::Repeated || event->state == KeyboardKeyState::Pressed) {
             if (!waylandServer()->isKeyboardShortcutsInhibited()) {
                 if (input()->shortcuts()->processKey(event->modifiersRelevantForGlobalShortcuts, event->key)) {
+                    triggerInputBoost();
                     input()->keyboard()->addFilteredKey(event->nativeScanCode);
                     return true;
                 }
@@ -1056,6 +1059,7 @@ public:
     }
     bool swipeGestureBegin(int fingerCount, std::chrono::microseconds time) override
     {
+        triggerInputBoost();
         m_touchpadGestureFingerCount = fingerCount;
         if (m_touchpadGestureFingerCount >= 3) {
             input()->shortcuts()->processSwipeStart(DeviceType::Touchpad, fingerCount);
@@ -1093,6 +1097,7 @@ public:
     }
     bool pinchGestureBegin(int fingerCount, std::chrono::microseconds time) override
     {
+        triggerInputBoost();
         m_touchpadGestureFingerCount = fingerCount;
         if (m_touchpadGestureFingerCount >= 3) {
             input()->shortcuts()->processPinchStart(fingerCount);

@@ -10,6 +10,7 @@
 #include "touch_input.h"
 
 #include "config-kwin.h"
+#include "utils/realtime.h"
 
 #include "decorations/decoratedwindow.h"
 #include "input_event_spy.h"
@@ -106,6 +107,7 @@ void TouchInputRedirection::cleanupDecoration(Decoration::DecoratedWindowImpl *o
 
 void TouchInputRedirection::processDown(qint32 id, const QPointF &pos, std::chrono::microseconds time, InputDevice *device)
 {
+    triggerInputBoost();
     if (!inited()) {
         return;
     }

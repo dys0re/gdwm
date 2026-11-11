@@ -130,7 +130,7 @@ void Connection::doSetup()
 {
     Q_ASSERT(!m_notifier);
 
-    gainRealTime();
+    gainRealTime(55);
 
     m_notifier = std::make_unique<QSocketNotifier>(m_input->fileDescriptor(), QSocketNotifier::Read);
     connect(m_notifier.get(), &QSocketNotifier::activated, this, &Connection::handleEvent);

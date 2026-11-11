@@ -12,6 +12,7 @@
 #include "pointer_input.h"
 
 #include "config-kwin.h"
+#include "utils/realtime.h"
 
 #include "core/output.h"
 #include "cursorsource.h"
@@ -279,6 +280,7 @@ void PointerInputRedirection::processButton(uint32_t button, PointerButtonState 
     }
 
     if (state == PointerButtonState::Pressed) {
+        triggerInputBoost();
         update();
     }
 
