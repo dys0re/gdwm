@@ -10,6 +10,7 @@
 
 #include <QHash>
 #include <QRegion>
+#include <QSet>
 
 class QPainter;
 
@@ -18,6 +19,7 @@ namespace KWin
 
 class DecorationItem;
 class SurfaceItem;
+class Window;
 
 class KWIN_EXPORT ItemRendererQPainter : public ItemRenderer
 {
@@ -44,6 +46,10 @@ private:
     std::unique_ptr<QPainter> m_painter;
     QRegion m_backgroundOcclusion;
     QHash<const Item *, QRegion> m_occludedByAbove;
+    QSet<const Item *> m_transformedItems;
+    QRegion m_currentDeviceClip;
+    QImage *m_targetImage = nullptr;
+    mutable Window *m_currentWindow = nullptr;
 };
 
 } // namespace KWin
