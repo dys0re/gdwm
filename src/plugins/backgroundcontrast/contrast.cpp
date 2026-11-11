@@ -34,6 +34,30 @@ namespace KWin
 
 static const QByteArray s_contrastAtomName = QByteArrayLiteral("_KDE_NET_WM_BACKGROUND_CONTRAST_REGION");
 
+static bool isTbdrFastPath()
+{
+    static int s_fastPath = -1;
+    if (s_fastPath != -1) {
+        return s_fastPath == 1;
+    }
+    if (qEnvironmentVariableIsSet("KWIN_TBDR_FASTPATH")) {
+        s_fastPath = (qEnvironmentVariableIntValue("KWIN_TBDR_FASTPATH") != 0) ? 1 : 0;
+        return s_fastPath == 1;
+    }
+    const auto context = effects ? effects->openglContext() : nullptr;
+    if (context && !context->isSoftwareRenderer()) {
+        if (const auto gl = context->glPlatform()) {
+            if (!gl->isVirtualMachine() && !gl->isVirgl() &&
+                gl->driver() != Driver_Llvmpipe && gl->driver() != Driver_Softpipe && gl->driver() != Driver_Swrast) {
+                s_fastPath = 0;
+                return false;
+            }
+        }
+    }
+    s_fastPath = 1;
+    return true;
+}
+
 ContrastManagerInterface *ContrastEffect::s_contrastManager = nullptr;
 QTimer *ContrastEffect::s_contrastManagerRemoveTimer = nullptr;
 
@@ -110,6 +134,9 @@ void ContrastEffect::slotScreenGeometryChanged()
 
 void ContrastEffect::updateContrastRegion(EffectWindow *w)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
     QRegion region;
     QMatrix4x4 matrix;
     bool valid = false;
@@ -187,6 +214,9 @@ void ContrastEffect::updateContrastRegion(EffectWindow *w)
 
 void ContrastEffect::slotWindowAdded(EffectWindow *w)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
     SurfaceInterface *surf = w->surface();
 
     if (surf) {
@@ -281,7 +311,13 @@ QMatrix4x4 ContrastEffect::colorMatrix(qreal contrast, qreal intensity, qreal sa
 bool ContrastEffect::enabledByDefault()
 {
     const auto context = effects->openglContext();
-    if (!context || context->isSoftwareRenderer()) {
+    if (!context) {
+        return false;
+    }
+    if (isTbdrFastPath()) {
+        return true;
+    }
+    if (context->isSoftwareRenderer()) {
         return false;
     }
     const auto gl = context->glPlatform();
@@ -375,6 +411,10 @@ bool ContrastEffect::uploadGeometry(GLVertexBuffer *vbo, const QRegion &region, 
 
 bool ContrastEffect::shouldContrast(const EffectWindow *w, int mask, const WindowPaintData &data) const
 {
+    if (isTbdrFastPath()) {
+        return false;
+    }
+
     if (!m_shader || !m_shader->isValid()) {
         return false;
     }
@@ -399,7 +439,7 @@ bool ContrastEffect::shouldContrast(const EffectWindow *w, int mask, const Windo
 
 void ContrastEffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const QRegion &region, WindowPaintData &data)
 {
-    if (shouldContrast(w, mask, data)) {
+    if (!isTbdrFastPath() && shouldContrast(w, mask, data)) {
         const QRect screen = viewport.renderRect().toRect();
         QRegion shape = contrastRegion(w).translated(w->pos().toPoint());
 
@@ -435,6 +475,10 @@ void ContrastEffect::drawWindow(const RenderTarget &renderTarget, const RenderVi
 
 void ContrastEffect::doContrast(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, const QRegion &shape, const float opacity, const QMatrix4x4 &screenProjection)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
+
     const qreal scale = viewport.scale();
     const QRectF r = viewport.mapToRenderTarget(shape.boundingRect());
 

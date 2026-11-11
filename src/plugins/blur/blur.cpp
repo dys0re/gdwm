@@ -51,6 +51,33 @@ static void ensureResources()
 namespace KWin
 {
 
+static bool isTbdrFastPath()
+{
+    static int s_fastPath = -1;
+    if (s_fastPath != -1) {
+        return s_fastPath == 1;
+    }
+    if (qEnvironmentVariableIsSet("KWIN_TBDR_FASTPATH")) {
+        s_fastPath = (qEnvironmentVariableIntValue("KWIN_TBDR_FASTPATH") != 0) ? 1 : 0;
+        qWarning() << "[TBDR_BLUR] FASTPATH by ENV:" << s_fastPath;
+        return s_fastPath == 1;
+    }
+    const auto context = effects ? effects->openglContext() : nullptr;
+    if (context && !context->isSoftwareRenderer()) {
+        if (const auto gl = context->glPlatform()) {
+            if (!gl->isVirtualMachine() && !gl->isVirgl() &&
+                gl->driver() != Driver_Llvmpipe && gl->driver() != Driver_Softpipe && gl->driver() != Driver_Swrast) {
+                s_fastPath = 0;
+                qWarning() << "[TBDR_BLUR] FASTPATH disabled for hardware GPU:" << gl->driver();
+                return false;
+            }
+        }
+    }
+    s_fastPath = 1;
+    qWarning() << "[TBDR_BLUR] FASTPATH ENABLED! context:" << context;
+    return true;
+}
+
 static const QByteArray s_blurAtomName = QByteArrayLiteral("_KDE_NET_WM_BLUR_BEHIND_REGION");
 
 BlurManagerInterface *BlurEffect::s_blurManager = nullptr;
@@ -222,6 +249,9 @@ void BlurEffect::reconfigure(ReconfigureFlags flags)
 
 void BlurEffect::updateBlurRegion(EffectWindow *w)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
     std::optional<QRegion> content;
     std::optional<QRegion> frame;
 
@@ -277,6 +307,9 @@ void BlurEffect::updateBlurRegion(EffectWindow *w)
 
 void BlurEffect::slotWindowAdded(EffectWindow *w)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
     SurfaceInterface *surf = w->surface();
 
     if (surf) {
@@ -355,7 +388,13 @@ bool BlurEffect::eventFilter(QObject *watched, QEvent *event)
 bool BlurEffect::enabledByDefault()
 {
     const auto context = effects->openglContext();
-    if (!context || context->isSoftwareRenderer()) {
+    if (!context) {
+        return false;
+    }
+    if (isTbdrFastPath()) {
+        return true;
+    }
+    if (context->isSoftwareRenderer()) {
         return false;
     }
     GLPlatform *gl = context->glPlatform();
@@ -380,6 +419,9 @@ bool BlurEffect::supported()
 
 bool BlurEffect::decorationSupportsBlurBehind(const EffectWindow *w) const
 {
+    if (isTbdrFastPath()) {
+        return false;
+    }
     return w->decoration() && !w->decoration()->blurRegion().isNull();
 }
 
@@ -422,6 +464,11 @@ QRegion BlurEffect::blurRegion(EffectWindow *w) const
 
 void BlurEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime)
 {
+    if (isTbdrFastPath()) {
+        effects->prePaintScreen(data, presentTime);
+        return;
+    }
+
     m_paintedArea = QRegion();
     m_currentBlur = QRegion();
     m_currentScreen = effects->waylandDisplay() ? data.screen : nullptr;
@@ -431,6 +478,11 @@ void BlurEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseco
 
 void BlurEffect::prePaintWindow(EffectWindow *w, WindowPrePaintData &data, std::chrono::milliseconds presentTime)
 {
+    if (isTbdrFastPath()) {
+        effects->prePaintWindow(w, data, presentTime);
+        return;
+    }
+
     // this effect relies on prePaintWindow being called in the bottom to top order
 
     effects->prePaintWindow(w, data, presentTime);
@@ -476,6 +528,10 @@ void BlurEffect::prePaintWindow(EffectWindow *w, WindowPrePaintData &data, std::
 
 bool BlurEffect::shouldBlur(const EffectWindow *w, int mask, const WindowPaintData &data) const
 {
+    if (isTbdrFastPath()) {
+        return false;
+    }
+
     if (effects->activeFullScreenEffect() && !w->data(WindowForceBlurRole).toBool()) {
         return false;
     }
@@ -496,6 +552,11 @@ bool BlurEffect::shouldBlur(const EffectWindow *w, int mask, const WindowPaintDa
 
 void BlurEffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const QRegion &region, WindowPaintData &data)
 {
+    if (isTbdrFastPath()) {
+        effects->drawWindow(renderTarget, viewport, w, mask, region, data);
+        return;
+    }
+
     blur(renderTarget, viewport, w, mask, region, data);
 
     // Draw the window over the blurred area
@@ -540,6 +601,10 @@ GLTexture *BlurEffect::ensureNoiseTexture()
 
 void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const QRegion &region, WindowPaintData &data)
 {
+    if (isTbdrFastPath()) {
+        return;
+    }
+
     auto it = m_windows.find(w);
     if (it == m_windows.end()) {
         return;
