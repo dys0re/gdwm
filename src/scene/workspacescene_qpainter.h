@@ -30,7 +30,7 @@ public:
 
     bool animationsSupported() const override
     {
-        return false;
+        return true;
     }
 
     QPainterBackend *backend() const

@@ -83,7 +83,7 @@ std::unique_ptr<ShadowTextureProvider> WorkspaceSceneOpenGL::createShadowTexture
 bool WorkspaceSceneOpenGL::animationsSupported() const
 {
     const auto context = openglContext();
-    return context && !context->isSoftwareRenderer();
+    return context != nullptr;
 }
 
 std::pair<std::shared_ptr<GLTexture>, ColorDescription> WorkspaceSceneOpenGL::textureForOutput(Output *output) const

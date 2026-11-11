@@ -372,6 +372,9 @@ void CrossFadeEffect::drawWindow(const RenderTarget &renderTarget, const RenderV
 
 void CrossFadeEffect::redirect(EffectWindow *window)
 {
+    if (!effects || !effects->isOpenGLCompositing()) {
+        return;
+    }
     if (d->windows.empty()) {
         connect(effects, &EffectsHandler::windowDeleted, this, &CrossFadeEffect::handleWindowDeleted);
     }

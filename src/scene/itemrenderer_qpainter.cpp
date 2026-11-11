@@ -7,6 +7,7 @@
 #include "scene/itemrenderer_qpainter.h"
 #include "core/renderviewport.h"
 #include "effect/effect.h"
+#include "effect/effecthandler.h"
 #include "platformsupport/scenes/qpainter/qpaintersurfacetexture.h"
 #include "scene/decorationitem.h"
 #include "scene/imageitem.h"
@@ -49,7 +50,8 @@ void ItemRendererQPainter::beginFrame(const RenderTarget &renderTarget, const Re
     m_backgroundOcclusion = QRegion();
     m_occludedByAbove.clear();
 
-    if (workspace()) {
+    const bool anyEffectAnimating = effects && !effects->activeEffects().isEmpty();
+    if (workspace() && !anyEffectAnimating) {
         const auto &windows = workspace()->stackingOrder();
         QRegion currentOcclusion;
         // Traverse stacking order from top-most to bottom-most window
@@ -139,9 +141,11 @@ void ItemRendererQPainter::renderItem(const RenderTarget &renderTarget, const Re
     m_painter->setClipping(true);
     m_painter->setOpacity(data.opacity());
 
-    if (mask & Scene::PAINT_WINDOW_TRANSFORMED) {
+    if (mask & (Scene::PAINT_WINDOW_TRANSFORMED | Scene::PAINT_SCREEN_TRANSFORMED)) {
+        m_painter->translate(item->position());
         m_painter->translate(data.xTranslation(), data.yTranslation());
         m_painter->scale(data.xScale(), data.yScale());
+        m_painter->translate(-item->position());
     }
 
     renderItem(m_painter.get(), item);
@@ -246,6 +250,7 @@ void ItemRendererQPainter::renderSurfaceItem(QPainter *painter, SurfaceItem *sur
 
     // Fast-path: check if transform is unscaled 1:1, unrotated, and aligned to integer pixels
     const bool isIntegerUnscaled = (surfaceToBufferTransform.kind() == OutputTransform::Normal)
+        && (painter->worldTransform().type() <= QTransform::TxTranslate)
         && std::abs(xSourceBoxScale - 1.0) < 1e-4
         && std::abs(ySourceBoxScale - 1.0) < 1e-4
         && std::abs(sourceBox.x()) < 1e-4
