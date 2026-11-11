@@ -388,6 +388,10 @@ inline void lindowsBlendRegionSimd(QImage *dst,
     if (validSrc.isEmpty()) {
         return;
     }
+    dstX += (validSrc.x() - srcX);
+    dstY += (validSrc.y() - srcY);
+    srcX = validSrc.x();
+    srcY = validSrc.y();
     const int validW = validSrc.width();
     const int validH = validSrc.height();
     const QRect dstBounds(dstX, dstY, validW, validH);
